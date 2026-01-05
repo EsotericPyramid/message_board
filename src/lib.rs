@@ -3,7 +3,6 @@ use std::path::Path;
 pub const PORT: u16 = 8000;
 pub const ROOT_ID: u64 = 0x00_00_00_00;
 pub const ENTRY_MAGIC_NUMBER: u16 = 0x1234;
-pub const USER_LIST_MAGIC_NUMBER: u16 = 0x9876;
 pub const USER_MAGIC_NUMBER: u16 = 0x1470;
 
 /// file versions
@@ -59,6 +58,7 @@ pub enum EntryError {
     MessageError,
     AccessGroupError,
     NoReaderForVersion,
+    InsufficientPerms,
 }
 
 impl Entry {
@@ -303,7 +303,8 @@ pub enum UserError {
     FileIOError(std::io::Error),
     Utf8Error,
     FormattingError,
-    DoesNotExist
+    DoesNotExist,
+    DuplicateID,
 }
 
 impl UserData {
@@ -339,11 +340,52 @@ impl UserData {
     }
 
     pub fn extend_data(&self, data: &mut Vec<u8>) {
-        todo!();
+        data.extend_from_slice(&USER_MAGIC_NUMBER.to_le_bytes());
+        assert!(self.entry_ids.len() > u32::MAX as usize, "Failed to write user: Too many entries: {}", self.entry_ids.len());
+        data.extend_from_slice(&(self.entry_ids.len() as u32).to_le_bytes());
+        data.extend(self.entry_ids.iter().flat_map(|x| x.to_le_bytes()));
     }
 }
 
 pub enum DataError {
     Entry(EntryError),
     User(UserError)
+}
+
+impl From<EntryError> for DataError {
+    fn from(value: EntryError) -> Self {
+        DataError::Entry(value)
+    }
+}
+
+impl From<UserError> for DataError {
+    fn from(value: UserError) -> Self {
+        DataError::User(value)
+    }
+}
+
+pub enum BoardRequest {
+    GetEntry { user_id: u64, entry_id: u64 },
+    AddEntry { user_id: u64, entry_id: u64, entry: Entry },
+    GetUser { user_id: u64 },
+    AddUser { user_id: u64 },
+}
+
+// the response 
+pub struct BoardResponse {
+    pub handler_id: u64,
+    pub data: Result<BoardResponseData, DataError>,
+}
+
+pub enum BoardResponseData {
+    GetEntry(Entry),
+    AddEntry,
+    GetUser(UserData),
+    AddUser
+}
+
+impl BoardResponseData {
+    pub fn into_data(&self) -> Vec<u8> {
+        todo!()
+    }
 }
