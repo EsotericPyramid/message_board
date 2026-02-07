@@ -1,4 +1,6 @@
 use std::path::Path;
+/// TODO:
+///     - consolidate Error types
 
 pub const PORT: u16 = 8000;
 pub const ROOT_ID: u64 = 0x00_00_00_00;
@@ -7,11 +9,21 @@ pub const USER_MAGIC_NUMBER: u16 = 0x1470;
 
 /// file versions
 pub const ENTRY_FILE_VERSION: u8 = 0x00;
-pub const USRE_FILE_VERSION: u8 = 0x00;
+pub const USER_FILE_VERSION: u8 = 0x00;
+pub const REQUEST_FORMAT_VERSION: u8 = 0x00;
+pub const RESPONSE_FORMAT_VERSION: u8 = 0x00;
 
-/// file discriminants
+/// file discriminants 
+/// General Use
+pub const ERROR: u8 = 0xff;
+/// Entry
 pub const MESSAGE: u8 = 0x00;
 pub const ACCESS_GROUP: u8 = 0x01;
+/// Request & Response
+pub const GET_ENTRY: u8 = 0x00;
+pub const ADD_ENTRY: u8 = 0x01;
+pub const GET_USER: u8 = 0x20;
+pub const ADD_USER: u8 = 0x21;
 
 /// access group
 pub const INHERIT_BASE: u8 = 0x00;
@@ -105,9 +117,12 @@ impl Entry {
     /// 
     pub fn from_data(data: &[u8]) -> Result<Self, EntryError> {
         let mut data_iter = data.iter().copied();
+        Self::from_data_iter(&mut data_iter)
+    }
 
-        let (header_data, entry_type) = HeaderData::from_data_iter(&mut data_iter)?;
-        let entry_data = EntryData::from_data_iter(&mut data_iter, entry_type)?;
+    pub fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, EntryError> {
+        let (header_data, entry_type) = HeaderData::from_data_iter(data_iter)?;
+        let entry_data = EntryData::from_data_iter(data_iter, entry_type)?;
         Ok(Entry {
             header_data,
             entry_data,
@@ -305,6 +320,7 @@ pub enum UserError {
     FormattingError,
     DoesNotExist,
     DuplicateID,
+    NoReaderForVersion,
 }
 
 impl UserData {
@@ -316,6 +332,7 @@ impl UserData {
     /// 
     /// data format, numbers are little endian:
     ///     magic number (u16): see `USER_MAGIC_NUMBER`
+    ///     version number (u8)
     ///     number of entry ids (u32),
     ///     entry id 1 (u64),
     ///     ...
@@ -323,6 +340,8 @@ impl UserData {
     pub fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, UserError> {
         let magic_number = read_u16(data_iter).ok_or(UserError::FormattingError)?;
         if magic_number != USER_MAGIC_NUMBER {return Err(UserError::FormattingError)};
+        let version = data_iter.next().ok_or(UserError::FormattingError)?;
+        if version != 0 {return Err(UserError::NoReaderForVersion)};
         let num_entries = read_u32(data_iter).ok_or(UserError::FormattingError)? as usize;
         let mut entry_ids = Vec::with_capacity(num_entries);
         for _ in 0..num_entries {
@@ -341,6 +360,7 @@ impl UserData {
 
     pub fn extend_data(&self, data: &mut Vec<u8>) {
         data.extend_from_slice(&USER_MAGIC_NUMBER.to_le_bytes());
+        data.push(USER_FILE_VERSION);
         assert!(self.entry_ids.len() > u32::MAX as usize, "Failed to write user: Too many entries: {}", self.entry_ids.len());
         data.extend_from_slice(&(self.entry_ids.len() as u32).to_le_bytes());
         data.extend(self.entry_ids.iter().flat_map(|x| x.to_le_bytes()));
@@ -364,6 +384,25 @@ impl From<UserError> for DataError {
     }
 }
 
+/// data format:
+///     version (u8): 00
+///     variant discriminant (u8) (listed with each variant)
+///     - variant specific data -
+/// 
+/// GetEntry, 00:
+///     user_id (u64)
+///     entry_id (u64)
+/// 
+/// AddEntry, 01:
+///     user_id (u64)
+///     entry_id (u64)
+///     - Entry data - 
+/// 
+/// GetUser, 20:
+///     user_id (u64)
+/// 
+/// AddUser, 21:
+///     user_id (u64)
 pub enum BoardRequest {
     GetEntry { user_id: u64, entry_id: u64 },
     AddEntry { user_id: u64, entry_id: u64, entry: Entry },
@@ -371,7 +410,83 @@ pub enum BoardRequest {
     AddUser { user_id: u64 },
 }
 
+pub enum IOError {
+    InvalidData,
+    NoReaderForVersion,
+    Data(DataError),
+}
+
+impl<T: Into<DataError>> From<T> for IOError {
+    fn from(value: T) -> Self {IOError::Data(value.into())}
+}
+
+impl BoardRequest {
+    pub fn from_data(data: &[u8]) -> Result<Self, IOError> {
+        let data_iter = &mut data.iter().copied();
+        let version = data_iter.next().ok_or(IOError::InvalidData)?;
+        if version != 0x00 {return Err(IOError::NoReaderForVersion)};
+        let discriminant = data_iter.next().ok_or(IOError::InvalidData)?;
+        Ok(match discriminant {
+            // entry requests
+            GET_ENTRY => { // GetEntry
+                let user_id = read_u64(data_iter).ok_or(IOError::InvalidData)?;
+                let entry_id = read_u64(data_iter).ok_or(IOError::InvalidData)?;
+                BoardRequest::GetEntry { user_id, entry_id }
+            }
+            ADD_ENTRY => { // AddEntry
+                let user_id = read_u64(data_iter).ok_or(IOError::InvalidData)?;
+                let entry_id = read_u64(data_iter).ok_or(IOError::InvalidData)?;
+                let entry = Entry::from_data_iter(data_iter)?;
+                BoardRequest::AddEntry { user_id, entry_id, entry }
+            }
+            // user requests
+            GET_USER => { // GetUser
+                let user_id = read_u64(data_iter).ok_or(IOError::InvalidData)?;
+                BoardRequest::GetUser { user_id }
+            }
+            ADD_USER => { // AddUser
+                let user_id = read_u64(data_iter).ok_or(IOError::InvalidData)?;
+                BoardRequest::AddUser { user_id }
+            }
+            
+            _ => {return Err(IOError::InvalidData)}
+        })
+    }
+
+    pub fn into_data(&self) -> Vec<u8> {
+        let mut data = Vec::new();
+        self.extend_data(&mut data);
+        data
+    }
+
+    pub fn extend_data(&self, data: &mut Vec<u8>) {
+        data.push(REQUEST_FORMAT_VERSION); //version
+        match self {
+            BoardRequest::GetEntry { user_id, entry_id } => {
+                data.push(GET_ENTRY);
+                data.extend_from_slice(&user_id.to_le_bytes());
+                data.extend_from_slice(&entry_id.to_le_bytes());
+            },
+            BoardRequest::AddEntry { user_id, entry_id, entry } => {
+                data.push(ADD_ENTRY);
+                data.extend_from_slice(&user_id.to_le_bytes());
+                data.extend_from_slice(&entry_id.to_le_bytes());
+                entry.extend_data(data);
+            },
+            BoardRequest::GetUser { user_id } => {
+                data.push(GET_USER);
+                data.extend_from_slice(&user_id.to_le_bytes());
+            },
+            BoardRequest::AddUser { user_id } => {
+                data.push(ADD_USER);
+                data.extend_from_slice(&user_id.to_le_bytes());
+            },
+        };
+    }
+}
+
 // the response 
+// TODO: move into server.rs
 pub struct BoardResponse {
     pub handler_id: u64,
     pub data: Result<BoardResponseData, DataError>,
@@ -384,8 +499,75 @@ pub enum BoardResponseData {
     AddUser
 }
 
+/// data format:
+///     version (u8): 0
+///     variant discriminant (u8) (listed with each variant)
+/// 
+/// GetEntry, 00:
+///     - Entry Data -
+/// 
+/// AddEntry, 01:
+///     - No data -
+/// 
+/// GetUser, 20:
+///     - User Data -
+/// 
+/// AddUser, 21:
+///     - No data -
 impl BoardResponseData {
-    pub fn into_data(&self) -> Vec<u8> {
-        todo!()
+    pub fn from_data(data: &[u8]) -> Result<Self, IOError> {
+        let mut data_iter = data.iter().copied();
+        let version = data_iter.next().ok_or(IOError::InvalidData)?;
+        if version != 0 {return Err(IOError::NoReaderForVersion)}
+        Ok(match data_iter.next().ok_or(IOError::InvalidData)? {
+            // entry requests
+            GET_ENTRY => { // GetEntry
+                let entry = Entry::from_data_iter(&mut data_iter)?;
+                BoardResponseData::GetEntry(entry)
+            }
+            ADD_ENTRY => { // AddEntry
+                BoardResponseData::AddEntry
+            }
+            // user requests
+            GET_USER => { // GetUser
+                let user = UserData::from_data_iter(&mut data_iter)?;
+                BoardResponseData::GetUser(user)
+            }
+            ADD_USER => { // AddUser
+                BoardResponseData::AddUser
+            }
+            
+            _ => {return Err(IOError::InvalidData)}
+        })
+
+    }
+
+    pub fn into_data(val: Result<Self, DataError>) -> Vec<u8> {
+        let mut out = Vec::new();
+        Self::extend_data(val, &mut out);
+        out
+    }
+
+    pub fn extend_data(val: Result<Self, DataError>, data: &mut Vec<u8>) {
+        data.push(RESPONSE_FORMAT_VERSION);
+        match val {
+            Ok(BoardResponseData::GetEntry(entry)) => {
+                data.push(GET_ENTRY);
+                entry.extend_data(data);
+            }
+            Ok(BoardResponseData::AddEntry) => {
+                data.push(ADD_ENTRY);
+            }
+            Ok(BoardResponseData::GetUser(user)) => {
+                data.push(GET_USER);
+                user.extend_data(data);
+            }
+            Ok(BoardResponseData::AddUser) => {
+                data.push(ADD_USER);
+            }
+            Err(_) => { // TODO: should consider the error
+                data.push(ERROR);
+            }
+        }
     }
 }
