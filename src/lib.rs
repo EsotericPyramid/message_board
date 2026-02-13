@@ -57,11 +57,13 @@ fn read_u64(data_iter: &mut impl Iterator<Item = u8>) -> Option<u64> {
     Some(u64::from_le_bytes(num))
 }
 
+#[derive(PartialEq, Eq, Debug)]
 pub struct Entry {
     pub entry_data: EntryData,
     pub header_data: HeaderData,
 }
 
+#[derive(Debug)]
 pub enum EntryError {
     DuplicateID,
     FileIOError(std::io::Error),
@@ -141,6 +143,7 @@ impl Entry {
     }
 }
 
+#[derive(PartialEq, Eq, Debug)]
 pub struct HeaderData {
     pub version: u8,
     pub parent_id: u64,
@@ -197,9 +200,11 @@ impl HeaderData {
         assert!(self.children_ids.len() <= u16::MAX as usize, "Failed to write entry: Too many children {}", self.children_ids.len());
         data.extend_from_slice(&(self.children_ids.len() as u16).to_le_bytes());
         data.extend(self.children_ids.iter().flat_map(|x| x.to_le_bytes()));
+        data.extend_from_slice(&self.author_id.to_le_bytes());
     }
 }
 
+#[derive(PartialEq, Eq, Debug)]
 pub enum EntryData {
     Message {
         timestamp: u64,
@@ -231,6 +236,7 @@ impl EntryData {
                 let timestamp = read_u64(data_iter).ok_or(EntryError::MessageError)?;
                 let message_size = read_u32(data_iter).ok_or(EntryError::MessageError)? as usize;
                 let message = String::from_utf8(data_iter.take(message_size).collect::<Vec<_>>()).map_err(|e| EntryError::Utf8Error(e))?;
+                //if message.len() != message_size {return Err(EntryError::MessageError)}
                 EntryData::Message { timestamp, message }
             }
             ACCESS_GROUP => { // AccessGroup
@@ -294,6 +300,7 @@ impl EntryData {
     }
 }
 
+#[derive(PartialEq, Eq, Debug)]
 pub enum AccessBase {
     Inherit,
     White,
@@ -310,10 +317,12 @@ impl AccessBase {
     }
 }
 
+#[derive(PartialEq, Eq, Debug)]
 pub struct UserData {
     pub entry_ids: Vec<u64>,
 }
 
+#[derive(Debug)]
 pub enum UserError {
     FileIOError(std::io::Error),
     Utf8Error,
@@ -361,12 +370,13 @@ impl UserData {
     pub fn extend_data(&self, data: &mut Vec<u8>) {
         data.extend_from_slice(&USER_MAGIC_NUMBER.to_le_bytes());
         data.push(USER_FILE_VERSION);
-        assert!(self.entry_ids.len() > u32::MAX as usize, "Failed to write user: Too many entries: {}", self.entry_ids.len());
+        assert!(self.entry_ids.len() <= u32::MAX as usize, "Failed to write user: Too many entries: {}", self.entry_ids.len());
         data.extend_from_slice(&(self.entry_ids.len() as u32).to_le_bytes());
         data.extend(self.entry_ids.iter().flat_map(|x| x.to_le_bytes()));
     }
 }
 
+#[derive(Debug)]
 pub enum DataError {
     Entry(EntryError),
     User(UserError)
@@ -403,6 +413,7 @@ impl From<UserError> for DataError {
 /// 
 /// AddUser, 21:
 ///     user_id (u64)
+#[derive(PartialEq, Eq, Debug)]
 pub enum BoardRequest {
     GetEntry { user_id: u64, entry_id: u64 },
     AddEntry { user_id: u64, entry_id: u64, entry: Entry },
@@ -410,6 +421,7 @@ pub enum BoardRequest {
     AddUser { user_id: u64 },
 }
 
+#[derive(Debug)]
 pub enum IOError {
     InvalidData,
     NoReaderForVersion,
@@ -492,6 +504,23 @@ pub struct BoardResponse {
     pub data: Result<BoardResponseData, DataError>,
 }
 
+/// note: this ignores the equality of an error if present in both, only whether they both have one 
+impl PartialEq for BoardResponse {
+    fn eq(&self, other: &Self) -> bool {
+        let mut is_eq = true;
+        is_eq &= self.handler_id == other.handler_id;
+        match (&self.data, &other.data) {
+            (Ok(a), Ok(b)) => {is_eq &= a == b;}
+            (Err(_), Err(_)) => {is_eq &= true}
+            _ => {is_eq &= false}
+        }
+        is_eq
+    }
+}
+
+impl Eq for BoardResponse {}
+
+#[derive(PartialEq, Eq, Debug)]
 pub enum BoardResponseData {
     GetEntry(Entry),
     AddEntry,
