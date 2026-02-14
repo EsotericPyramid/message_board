@@ -44,92 +44,83 @@ struct MessageBoard {
 
 #[allow(unused)]
 impl MessageBoard {
-    /// encapsulation method to get the raw, unparsed data of an entry
-    /// 
-    /// may or may not be implemented in terms of `get_entry_data_iter`
-    fn get_entry_data(&self, entry_id: u64) -> Result<Vec<u8>, EntryError> {
-        let mut path = PathBuf::from(self.file_dir.clone());
-        path.push(format!("entries/{:08X}", entry_id));
-        std::fs::read(path).map_err(|x| EntryError::FileIOError(x))
-    }
-
     /// encapsulation method to get the raw, unparsed data of an entry in the form of an iter
     /// use is generally prefered over `get_entry_data`
     /// 
     /// may or may not be implemented in terms of `get_entry_data`
-    fn get_entry_data_iter(&self, entry_id: u64) -> Result<impl Iterator<Item = u8>, EntryError> {
+    fn get_entry_data_iter(&self, entry_id: u64) -> Result<impl Iterator<Item = u8>, DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push(format!("entries/{:08X}", entry_id));
-        let entry = std::fs::File::open(path).map_err(|x| EntryError::FileIOError(x))?;
+        let entry = std::fs::File::open(path).map_err(|_| DataError::DoesNotExist)?;
         Ok(BufReader::new(entry).bytes().filter_map(|x| x.ok())) // Scuff
     }
 
     /// encapsulation method to get a `UserData` of a `user_id`
-    fn get_user(&self, user_id: u64) -> Result<UserData, UserError> {
+    fn get_user(&self, user_id: u64) -> Result<UserData, DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push(format!("users/{:08X}", user_id));
-        UserData::from_data(&std::fs::read(path).map_err(|x| UserError::FileIOError(x))?)
+        UserData::from_data(&std::fs::read(path).map_err(|_| DataError::DoesNotExist)?)
     }
 
     /// encapsulation method to write an `Entry` at `entry_id`
     /// 
     /// requires that the entry_id doesn't currently exist
-    fn write_entry(&self, entry_id: u64, entry: Entry) -> Result<(), EntryError> {
+    fn write_entry(&self, entry_id: u64, entry: Entry) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push(format!("entries/{:08X}", entry_id));
-        let exists = fs::exists(&path).map_err(|x| EntryError::FileIOError(x))?;
-        if exists {return Err(EntryError::DuplicateID);}
-        fs::write(path, entry.into_data()).map_err(|x| EntryError::FileIOError(x))?;
+        let exists = fs::exists(&path).map_err(|_| DataError::InternalError)?;
+        if exists {return Err(DataError::AlreadyExists);}
+        fs::write(path, entry.into_data()).map_err(|_| DataError::InternalError)?;
         Ok(())
     }
 
     /// encapsulation method to force write an `Entry` at `entry_id`
     /// 
     /// can be used to edit entries unlike `write_entry` but is otherwise identical
-    fn force_write_entry(&self, entry_id: u64, entry: Entry) -> Result<(), EntryError> {
+    fn force_write_entry(&self, entry_id: u64, entry: Entry) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push(format!("entries/{:08X}", entry_id));
-        fs::write(path, entry.into_data()).map_err(|x| EntryError::FileIOError(x))?;
+        fs::write(path, entry.into_data()).map_err(|_| DataError::InternalError)?;
         Ok(())
     }
 
     /// encapsulation method to write an updated `UserData` for `user_id`
     /// 
     /// requires that the user_id currently exists
-    fn write_user_data(&self, user_id: u64, data: UserData) -> Result<(), UserError> {
+    fn write_user_data(&self, user_id: u64, data: UserData) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push(format!("users/{:08X}", user_id));
-        let exists = fs::exists(&path).map_err(|x| UserError::FileIOError(x))?;
-        if !exists {return Err(UserError::DoesNotExist);}
+        let exists = fs::exists(&path).map_err(|_| DataError::InternalError)?;
+        if !exists {return Err(DataError::DoesNotExist);}
 
-        fs::write(path, data.into_data()).map_err(|x| UserError::FileIOError(x))?;
+        fs::write(path, data.into_data()).map_err(|x| DataError::InternalError)?;
         Ok(())
     }
 
 
-    fn get_user_list(&self) -> Result<Vec<u64>, UserError> {
+    fn get_user_list(&self) -> Result<Vec<u64>, DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push("user_list");
-        let data = fs::read(path).map_err(|x| UserError::FileIOError(x))?;
+        let data = fs::read(path).map_err(|x| DataError::DoesNotExist)?;
         let (data, remainder) = data.as_chunks::<8>();
-        if remainder.len() != 0 {return Err(UserError::FormattingError)}
+        if remainder.len() != 0 {return Err(DataError::InsufficientBytes)} // FIXME: questionable error
         Ok(data.iter().map(|x| u64::from_le_bytes(*x)).collect::<Vec<_>>())
     }
 
-    fn get_entry(&self, entry_id: u64) -> Result<Entry, EntryError> {
-        Entry::from_data(&self.get_entry_data(entry_id)?)
+    fn get_entry(&self, entry_id: u64) -> Result<Entry, DataError> {
+        Entry::from_data_iter(&mut self.get_entry_data_iter(entry_id)?)
     }
 
     fn add_entry(&self, user_id:u64, entry_id: u64, entry: Entry) -> Result<(), DataError> {
-        self.write_entry(entry_id, entry).map_err(|x| DataError::Entry(x))?;
-        let mut user_data = self.get_user(user_id).map_err(|x| DataError::User(x))?;
+        self.write_entry(entry_id, entry)?;
+        let mut user_data = self.get_user(user_id)?;
         user_data.entry_ids.push(entry_id);
-        self.write_user_data(user_id, user_data).map_err(|x| DataError::User(x))?;
+        self.write_user_data(user_id, user_data)?;
         Ok(())
     }
 
     /// checks if the user has perms to the *children* of the entry
-    fn has_access_perm(&self, user_id: u64, entry_id: u64) -> Result<bool, EntryError> {
+    fn has_access_perm(&self, user_id: u64, entry_id: u64) -> Result<bool, DataError> {
         let mut data_iter = self.get_entry_data_iter(entry_id)?;
         let (mut header, mut entry_type) = HeaderData::from_data_iter(&mut data_iter)?;
         let mut current_id = entry_id;
@@ -140,7 +131,7 @@ impl MessageBoard {
                     access_base,
                     whitelist_ids,
                     blacklist_ids,
-                } = EntryData::from_data_iter(&mut data_iter, entry_type)? else {return Err(EntryError::HeaderError)};
+                } = EntryData::from_data_iter(&mut data_iter, entry_type)? else {panic!("EntryData read as an AccessGroup should match an AccessGroup")};
 
                 if whitelist_ids.contains(&user_id) {
                     return Ok(true);
@@ -165,14 +156,15 @@ impl MessageBoard {
         Ok(false)
     }
 
-    fn add_user(&self, new_user_id: u64) -> Result<(), UserError> {
+    fn add_user(&self, new_user_id: u64) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push("user_list");
-        let mut user_list = std::fs::File::open(&path).map_err(|e| UserError::FileIOError(e))?;
-        user_list.write_all(&new_user_id.to_le_bytes()).map_err(|e| UserError::FileIOError(e))?;
+        let mut user_list = std::fs::File::open(&path).map_err(|_| DataError::InternalError)?;
+        user_list.write_all(&new_user_id.to_le_bytes()).map_err(|_| DataError::InternalError)?; // FIXME?: check if this could actually be meaningfully communicated
         path.clear();
-        path.push(format!("{}/users/{:08X}", self.file_dir.to_str().ok_or(UserError::Utf8Error)?, new_user_id));
-        fs::File::create(&path).map_err(|x| UserError::FileIOError(x))?;
+        path.push(&self.file_dir);
+        path.push(format!("users/{:08X}", new_user_id));
+        fs::File::create(&path).map_err(|_| DataError::AlreadyExists)?;
         Ok(())
     }
 
@@ -185,13 +177,13 @@ impl MessageBoard {
                     BoardRequest::GetEntry { user_id, entry_id} => {
                         let entry = board.get_entry(entry_id)?;
                         if entry.header_data.author_id != user_id && !board.has_access_perm(user_id, entry.header_data.parent_id)? {
-                            return Err(EntryError::InsufficientPerms.into())
+                            return Err(DataError::InsufficientPerms.into())
                         }
                         Ok(BoardResponseData::GetEntry(entry))
                     }
                     BoardRequest::AddEntry { user_id , entry_id , entry} => {
                         if !board.has_access_perm(user_id, entry.header_data.parent_id)? {
-                            return Err(EntryError::InsufficientPerms.into())
+                            return Err(DataError::InsufficientPerms.into())
                         }
                         board.add_entry(user_id, entry_id, entry)?;
                         Ok(BoardResponseData::AddEntry)
@@ -202,7 +194,7 @@ impl MessageBoard {
                     }
                     BoardRequest::AddUser { user_id } => {
                         let users = board.get_user_list()?;
-                        if users.contains(&user_id) {return Err(UserError::DuplicateID.into())}
+                        if users.contains(&user_id) {return Err(DataError::AlreadyExists.into())}
                         board.add_user(user_id)?;
                         Ok(BoardResponseData::AddUser)
                     }

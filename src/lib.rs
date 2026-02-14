@@ -1,6 +1,4 @@
-use std::path::Path;
-/// TODO:
-///     - consolidate Error types
+use std::string::FromUtf8Error;
 
 pub const PORT: u16 = 8000;
 pub const ROOT_ID: u64 = 0x00_00_00_00;
@@ -33,28 +31,49 @@ pub const BLACK_BASE: u8 = 0x02;
 #[cfg(test)]
 pub mod tests;
 
-fn read_u16(data_iter: &mut impl Iterator<Item = u8>) -> Option<u16> {
+#[derive(Debug)]
+pub enum DataError { 
+    IncorrectMagicNum,
+    InsufficientBytes,
+    InvalidDiscriminant,
+    StringError(std::string::FromUtf8Error),
+    UnsupportedVersion,
+
+    DoesNotExist,
+    AlreadyExists,
+    InsufficientPerms,
+
+    InternalError,
+}
+
+impl From<FromUtf8Error> for DataError {
+    fn from(value: FromUtf8Error) -> Self {
+        DataError::StringError(value)
+    }
+}
+
+fn read_u16(data_iter: &mut impl Iterator<Item = u8>) -> Result<u16, DataError> {
     let mut num = [0; 2];
     for i in 0..2 {
-        num[i] = data_iter.next()?;
+        num[i] = data_iter.next().ok_or(DataError::InsufficientBytes)?;
     }
-    Some(u16::from_le_bytes(num))
+    Ok(u16::from_le_bytes(num))
 }
 
-fn read_u32(data_iter: &mut impl Iterator<Item = u8>) -> Option<u32> {
+fn read_u32(data_iter: &mut impl Iterator<Item = u8>) -> Result<u32, DataError> {
     let mut num = [0; 4];
     for i in 0..4 {
-        num[i] = data_iter.next()?;
+        num[i] = data_iter.next().ok_or(DataError::InsufficientBytes)?;
     }
-    Some(u32::from_le_bytes(num))
+    Ok(u32::from_le_bytes(num))
 }
 
-fn read_u64(data_iter: &mut impl Iterator<Item = u8>) -> Option<u64> {
+fn read_u64(data_iter: &mut impl Iterator<Item = u8>) -> Result<u64, DataError> {
     let mut num = [0; 8];
     for i in 0..8 {
-        num[i] = data_iter.next()?;
+        num[i] = data_iter.next().ok_or(DataError::InsufficientBytes)?;
     }
-    Some(u64::from_le_bytes(num))
+    Ok(u64::from_le_bytes(num))
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -63,26 +82,7 @@ pub struct Entry {
     pub header_data: HeaderData,
 }
 
-#[derive(Debug)]
-pub enum EntryError {
-    DuplicateID,
-    FileIOError(std::io::Error),
-    Utf8Error(std::string::FromUtf8Error),
-    HeaderError,
-    MessageError,
-    AccessGroupError,
-    NoReaderForVersion,
-    InsufficientPerms,
-}
-
 impl Entry {
-    pub fn from_path(path: &Path) -> Result<Self, EntryError> {
-        let file_result = std::fs::read(path);
-        let Ok(file_data) = file_result else {return Err(EntryError::FileIOError(file_result.err().expect("Expecting an Err from a let else")))};
-
-        Self::from_data(&file_data)
-    }
-
     /// current file version: 0
     /// 
     /// data format, numbers are little endian: 
@@ -117,12 +117,12 @@ impl Entry {
     ///     blacklist id n (u64),
     /// 
     /// 
-    pub fn from_data(data: &[u8]) -> Result<Self, EntryError> {
+    pub fn from_data(data: &[u8]) -> Result<Self, DataError> {
         let mut data_iter = data.iter().copied();
         Self::from_data_iter(&mut data_iter)
     }
 
-    pub fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, EntryError> {
+    pub fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> {
         let (header_data, entry_type) = HeaderData::from_data_iter(data_iter)?;
         let entry_data = EntryData::from_data_iter(data_iter, entry_type)?;
         Ok(Entry {
@@ -152,37 +152,30 @@ pub struct HeaderData {
 }
 
 impl HeaderData {
-    pub fn from_path(path: &Path) -> Result<(Self, u8), EntryError> {
-        let file_result = std::fs::read(path);
-        let Ok(file_data) = file_result else {return Err(EntryError::FileIOError(file_result.err().expect("Expecting an Err from a let else")))};
-
-        Self::from_data(&file_data)
-    }
-
     /// gives a HeaderData and the entry type
-    pub fn from_data(data: &[u8]) -> Result<(Self, u8), EntryError> {
+    pub fn from_data(data: &[u8]) -> Result<(Self, u8), DataError> {
         let mut data_iter = data.iter().copied();
         HeaderData::from_data_iter(&mut data_iter)
     }
 
     /// gives a HeaderData and the entry type
-    pub fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<(Self, u8), EntryError> {
-        let magic_number = read_u16(data_iter).ok_or(EntryError::HeaderError)?;
-        if magic_number != ENTRY_MAGIC_NUMBER {return Err(EntryError::HeaderError)}
+    pub fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<(Self, u8), DataError> {
+        let magic_number = read_u16(data_iter)?;
+        if magic_number != ENTRY_MAGIC_NUMBER {return Err(DataError::IncorrectMagicNum)}
 
-        let version = data_iter.next().ok_or(EntryError::HeaderError)?;
-        if version != 0 {return Err(EntryError::NoReaderForVersion)}
+        let version = data_iter.next().ok_or(DataError::InsufficientBytes)?;
+        if version != 0 {return Err(DataError::UnsupportedVersion)}
 
-        let entry_type = data_iter.next().ok_or(EntryError::HeaderError)?;
+        let entry_type = data_iter.next().ok_or(DataError::InsufficientBytes)?;
 
-        let parent_id = read_u64(data_iter).ok_or(EntryError::HeaderError)?;
-        let num_children = read_u16(data_iter).ok_or(EntryError::HeaderError)?;
+        let parent_id = read_u64(data_iter)?;
+        let num_children = read_u16(data_iter)?;
         let mut children_ids = Vec::new();
         for _ in 0..num_children {
-            children_ids.push(read_u64(data_iter).ok_or(EntryError::HeaderError)?);
+            children_ids.push(read_u64(data_iter)?);
         }
 
-        let author_id = read_u64(data_iter).ok_or(EntryError::HeaderError)?;
+        let author_id = read_u64(data_iter)?;
         Ok((HeaderData { version, parent_id, children_ids, author_id }, entry_type))
     }
 
@@ -226,23 +219,23 @@ impl EntryData {
         }
     }
 
-    pub fn from_data(data: &[u8], entry_type: u8) -> Result<Self, EntryError> {
+    pub fn from_data(data: &[u8], entry_type: u8) -> Result<Self, DataError> {
         Self::from_data_iter(&mut data.iter().copied(), entry_type)
     }
 
-    pub fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>, entry_type: u8) -> Result<Self, EntryError> {
+    pub fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>, entry_type: u8) -> Result<Self, DataError> {
         Ok(match entry_type {
             MESSAGE => { // Message
-                let timestamp = read_u64(data_iter).ok_or(EntryError::MessageError)?;
-                let message_size = read_u32(data_iter).ok_or(EntryError::MessageError)? as usize;
-                let message = String::from_utf8(data_iter.take(message_size).collect::<Vec<_>>()).map_err(|e| EntryError::Utf8Error(e))?;
-                //if message.len() != message_size {return Err(EntryError::MessageError)}
+                let timestamp = read_u64(data_iter)?;
+                let message_size = read_u32(data_iter)? as usize;
+                let message = String::from_utf8(data_iter.take(message_size).collect::<Vec<_>>()).map_err(|e| DataError::StringError(e))?;
+                //if message.len() != message_size {return Err(DataError::MessageError)}
                 EntryData::Message { timestamp, message }
             }
             ACCESS_GROUP => { // AccessGroup
-                let name_len = read_u32(data_iter).ok_or(EntryError::AccessGroupError)? as usize;
-                let name = String::from_utf8((data_iter).take(name_len).collect::<Vec<_>>()).map_err(|e| EntryError::Utf8Error(e))?;
-                let access_base_discriminant = data_iter.next().ok_or(EntryError::AccessGroupError)?;
+                let name_len = read_u32(data_iter)? as usize;
+                let name = String::from_utf8((data_iter).take(name_len).collect::<Vec<_>>()).map_err(|e| DataError::StringError(e))?;
+                let access_base_discriminant = data_iter.next().ok_or(DataError::InsufficientBytes)?;
                 let access_base;
                 if access_base_discriminant == INHERIT_BASE {
                     access_base = AccessBase::Inherit;
@@ -251,22 +244,22 @@ impl EntryData {
                 } else if access_base_discriminant == WHITE_BASE {
                     access_base = AccessBase::White;
                 } else {
-                    return Err(EntryError::AccessGroupError)
+                    return Err(DataError::InvalidDiscriminant)
                 }
 
-                let num_whitelist_ids = read_u32(data_iter).ok_or(EntryError::AccessGroupError)?;
+                let num_whitelist_ids = read_u32(data_iter)?;
                 let mut whitelist_ids = Vec::with_capacity(num_whitelist_ids as usize);
                 for _ in 0..num_whitelist_ids {
-                    whitelist_ids.push(read_u64(data_iter).ok_or(EntryError::AccessGroupError)?);
+                    whitelist_ids.push(read_u64(data_iter)?);
                 }
-                let num_blacklist_ids = read_u32(data_iter).ok_or(EntryError::AccessGroupError)?;
+                let num_blacklist_ids = read_u32(data_iter)?;
                 let mut blacklist_ids = Vec::with_capacity(num_blacklist_ids as usize);
                 for _ in 0..num_blacklist_ids {
-                    blacklist_ids.push(read_u64(data_iter).ok_or(EntryError::AccessGroupError)?);
+                    blacklist_ids.push(read_u64(data_iter)?);
                 }
                 EntryData::AccessGroup { name, access_base, whitelist_ids, blacklist_ids }
             }
-            _ => {return Err(EntryError::HeaderError)}
+            _ => {return Err(DataError::InvalidDiscriminant)}
         })
     }
 
@@ -322,18 +315,8 @@ pub struct UserData {
     pub entry_ids: Vec<u64>,
 }
 
-#[derive(Debug)]
-pub enum UserError {
-    FileIOError(std::io::Error),
-    Utf8Error,
-    FormattingError,
-    DoesNotExist,
-    DuplicateID,
-    NoReaderForVersion,
-}
-
 impl UserData {
-    pub fn from_data(data: &[u8]) -> Result<Self, UserError> {
+    pub fn from_data(data: &[u8]) -> Result<Self, DataError> {
         Self::from_data_iter(&mut data.iter().copied())
     }
 
@@ -346,15 +329,15 @@ impl UserData {
     ///     entry id 1 (u64),
     ///     ...
     ///     entry id n (u64)
-    pub fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, UserError> {
-        let magic_number = read_u16(data_iter).ok_or(UserError::FormattingError)?;
-        if magic_number != USER_MAGIC_NUMBER {return Err(UserError::FormattingError)};
-        let version = data_iter.next().ok_or(UserError::FormattingError)?;
-        if version != 0 {return Err(UserError::NoReaderForVersion)};
-        let num_entries = read_u32(data_iter).ok_or(UserError::FormattingError)? as usize;
+    pub fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> {
+        let magic_number = read_u16(data_iter)?;
+        if magic_number != USER_MAGIC_NUMBER {return Err(DataError::IncorrectMagicNum)};
+        let version = data_iter.next().ok_or(DataError::InsufficientBytes)?;
+        if version != 0 {return Err(DataError::UnsupportedVersion)};
+        let num_entries = read_u32(data_iter)? as usize;
         let mut entry_ids = Vec::with_capacity(num_entries);
         for _ in 0..num_entries {
-            entry_ids.push(read_u64(data_iter).ok_or(UserError::FormattingError)?);
+            entry_ids.push(read_u64(data_iter)?);
         }
         Ok(UserData { 
             entry_ids
@@ -373,24 +356,6 @@ impl UserData {
         assert!(self.entry_ids.len() <= u32::MAX as usize, "Failed to write user: Too many entries: {}", self.entry_ids.len());
         data.extend_from_slice(&(self.entry_ids.len() as u32).to_le_bytes());
         data.extend(self.entry_ids.iter().flat_map(|x| x.to_le_bytes()));
-    }
-}
-
-#[derive(Debug)]
-pub enum DataError {
-    Entry(EntryError),
-    User(UserError)
-}
-
-impl From<EntryError> for DataError {
-    fn from(value: EntryError) -> Self {
-        DataError::Entry(value)
-    }
-}
-
-impl From<UserError> for DataError {
-    fn from(value: UserError) -> Self {
-        DataError::User(value)
     }
 }
 
@@ -421,47 +386,36 @@ pub enum BoardRequest {
     AddUser { user_id: u64 },
 }
 
-#[derive(Debug)]
-pub enum IOError {
-    InvalidData,
-    NoReaderForVersion,
-    Data(DataError),
-}
-
-impl<T: Into<DataError>> From<T> for IOError {
-    fn from(value: T) -> Self {IOError::Data(value.into())}
-}
-
 impl BoardRequest {
-    pub fn from_data(data: &[u8]) -> Result<Self, IOError> {
+    pub fn from_data(data: &[u8]) -> Result<Self, DataError> {
         let data_iter = &mut data.iter().copied();
-        let version = data_iter.next().ok_or(IOError::InvalidData)?;
-        if version != 0x00 {return Err(IOError::NoReaderForVersion)};
-        let discriminant = data_iter.next().ok_or(IOError::InvalidData)?;
+        let version = data_iter.next().ok_or(DataError::InsufficientBytes)?;
+        if version != 0x00 {return Err(DataError::UnsupportedVersion)};
+        let discriminant = data_iter.next().ok_or(DataError::InsufficientBytes)?;
         Ok(match discriminant {
             // entry requests
             GET_ENTRY => { // GetEntry
-                let user_id = read_u64(data_iter).ok_or(IOError::InvalidData)?;
-                let entry_id = read_u64(data_iter).ok_or(IOError::InvalidData)?;
+                let user_id = read_u64(data_iter)?;
+                let entry_id = read_u64(data_iter)?;
                 BoardRequest::GetEntry { user_id, entry_id }
             }
             ADD_ENTRY => { // AddEntry
-                let user_id = read_u64(data_iter).ok_or(IOError::InvalidData)?;
-                let entry_id = read_u64(data_iter).ok_or(IOError::InvalidData)?;
+                let user_id = read_u64(data_iter)?;
+                let entry_id = read_u64(data_iter)?;
                 let entry = Entry::from_data_iter(data_iter)?;
                 BoardRequest::AddEntry { user_id, entry_id, entry }
             }
             // user requests
             GET_USER => { // GetUser
-                let user_id = read_u64(data_iter).ok_or(IOError::InvalidData)?;
+                let user_id = read_u64(data_iter)?;
                 BoardRequest::GetUser { user_id }
             }
             ADD_USER => { // AddUser
-                let user_id = read_u64(data_iter).ok_or(IOError::InvalidData)?;
+                let user_id = read_u64(data_iter)?;
                 BoardRequest::AddUser { user_id }
             }
             
-            _ => {return Err(IOError::InvalidData)}
+            _ => {return Err(DataError::InvalidDiscriminant)}
         })
     }
 
@@ -544,11 +498,11 @@ pub enum BoardResponseData {
 /// AddUser, 21:
 ///     - No data -
 impl BoardResponseData {
-    pub fn from_data(data: &[u8]) -> Result<Self, IOError> {
+    pub fn from_data(data: &[u8]) -> Result<Self, DataError> {
         let mut data_iter = data.iter().copied();
-        let version = data_iter.next().ok_or(IOError::InvalidData)?;
-        if version != 0 {return Err(IOError::NoReaderForVersion)}
-        Ok(match data_iter.next().ok_or(IOError::InvalidData)? {
+        let version = data_iter.next().ok_or(DataError::InsufficientBytes)?;
+        if version != 0 {return Err(DataError::UnsupportedVersion)}
+        Ok(match data_iter.next().ok_or(DataError::InsufficientBytes)? {
             // entry requests
             GET_ENTRY => { // GetEntry
                 let entry = Entry::from_data_iter(&mut data_iter)?;
@@ -566,7 +520,7 @@ impl BoardResponseData {
                 BoardResponseData::AddUser
             }
             
-            _ => {return Err(IOError::InvalidData)}
+            _ => {return Err(DataError::InvalidDiscriminant)}
         })
 
     }
