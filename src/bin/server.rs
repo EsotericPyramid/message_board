@@ -44,6 +44,21 @@ struct MessageBoard {
 
 #[allow(unused)]
 impl MessageBoard {
+    fn write_new<P: AsRef<Path>>(path: P, contents: &[u8]) -> Result<(), DataError> {
+        fs::File::create_new(path).map_err(|_| DataError::AlreadyExists)?.write_all(contents).map_err(|_| DataError::InternalError)?;
+        Ok(())
+    }
+
+    fn overwrite_old<P: AsRef<Path>>(path: P, contents: &[u8]) -> Result<(), DataError> {
+        fs::File::options().write(true).truncate(true).open(&path).map_err(|_| DataError::DoesNotExist)?.write_all(contents).map_err(|_| DataError::InternalError)?;
+        Ok(())
+    }
+
+    fn append_old<P: AsRef<Path>>(path: P, contents: &[u8]) -> Result<(), DataError> {
+        fs::File::options().write(true).append(true).open(&path).map_err(|_| DataError::DoesNotExist)?.write_all(contents).map_err(|_| DataError::InternalError)?;
+        Ok(())
+    }
+
     /// encapsulation method to get the raw, unparsed data of an entry in the form of an iter
     /// use is generally prefered over `get_entry_data`
     /// 
@@ -68,33 +83,25 @@ impl MessageBoard {
     fn write_entry(&self, entry_id: u64, entry: Entry) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push(format!("entries/{:08X}", entry_id));
-        let exists = fs::exists(&path).map_err(|_| DataError::InternalError)?;
-        if exists {return Err(DataError::AlreadyExists);}
-        fs::write(path, entry.into_data()).map_err(|_| DataError::InternalError)?;
-        Ok(())
+        Self::write_new(path, &entry.into_data())
     }
 
-    /// encapsulation method to force write an `Entry` at `entry_id`
+    /// encapsulation method to overwrite / edit an `Entry` at `entry_id`
     /// 
-    /// can be used to edit entries unlike `write_entry` but is otherwise identical
-    fn force_write_entry(&self, entry_id: u64, entry: Entry) -> Result<(), DataError> {
+    /// requires that the entry_id currently exists
+    fn overwrite_entry(&self, entry_id: u64, new_entry: Entry) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push(format!("entries/{:08X}", entry_id));
-        fs::write(path, entry.into_data()).map_err(|_| DataError::InternalError)?;
-        Ok(())
+        Self::overwrite_old(path, &new_entry.into_data())
     }
 
-    /// encapsulation method to write an updated `UserData` for `user_id`
+    /// encapsulation method to overwrite an updated `UserData` for `user_id`
     /// 
     /// requires that the user_id currently exists
-    fn write_user_data(&self, user_id: u64, data: UserData) -> Result<(), DataError> {
+    fn overwrite_user_data(&self, user_id: u64, new_data: UserData) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push(format!("users/{:08X}", user_id));
-        let exists = fs::exists(&path).map_err(|_| DataError::InternalError)?;
-        if !exists {return Err(DataError::DoesNotExist);}
-
-        fs::write(path, data.into_data()).map_err(|x| DataError::InternalError)?;
-        Ok(())
+        Self::overwrite_old(path, &new_data.into_data()) //FIXME: completely overwrites, even for small edits
     }
 
 
@@ -115,7 +122,7 @@ impl MessageBoard {
         self.write_entry(entry_id, entry)?;
         let mut user_data = self.get_user(user_id)?;
         user_data.entry_ids.push(entry_id);
-        self.write_user_data(user_id, user_data)?;
+        self.overwrite_user_data(user_id, user_data)?;
         Ok(())
     }
 
