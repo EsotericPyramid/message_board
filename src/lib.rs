@@ -31,7 +31,7 @@ pub const BLACK_BASE: u8 = 0x02;
 #[cfg(test)]
 pub mod tests;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum DataError { 
     IncorrectMagicNum,
     InsufficientBytes,
@@ -453,34 +453,17 @@ impl BoardRequest {
 
 // the response 
 // TODO: move into server.rs
-pub struct BoardResponse {
-    pub handler_id: u64,
-    pub data: Result<BoardResponseData, DataError>,
-}
 
-/// note: this ignores the equality of an error if present in both, only whether they both have one 
-impl PartialEq for BoardResponse {
-    fn eq(&self, other: &Self) -> bool {
-        let mut is_eq = true;
-        is_eq &= self.handler_id == other.handler_id;
-        match (&self.data, &other.data) {
-            (Ok(a), Ok(b)) => {is_eq &= a == b;}
-            (Err(_), Err(_)) => {is_eq &= true}
-            _ => {is_eq &= false}
-        }
-        is_eq
-    }
-}
-
-impl Eq for BoardResponse {}
 
 #[derive(PartialEq, Eq, Debug)]
-pub enum BoardResponseData {
+pub enum BoardResponse {
     GetEntry(Entry),
     AddEntry,
     GetUser(UserData),
-    AddUser
+    AddUser,
 }
+
+pub type MaybeBoardResponse = Result<BoardResponse, DataError>;
 
 /// data format:
 ///     version (u8): 0
@@ -497,7 +480,7 @@ pub enum BoardResponseData {
 /// 
 /// AddUser, 21:
 ///     - No data -
-impl BoardResponseData {
+impl BoardResponse {
     pub fn from_data(data: &[u8]) -> Result<Self, DataError> {
         let mut data_iter = data.iter().copied();
         let version = data_iter.next().ok_or(DataError::InsufficientBytes)?;
@@ -506,18 +489,18 @@ impl BoardResponseData {
             // entry requests
             GET_ENTRY => { // GetEntry
                 let entry = Entry::from_data_iter(&mut data_iter)?;
-                BoardResponseData::GetEntry(entry)
+                BoardResponse::GetEntry(entry)
             }
             ADD_ENTRY => { // AddEntry
-                BoardResponseData::AddEntry
+                BoardResponse::AddEntry
             }
             // user requests
             GET_USER => { // GetUser
                 let user = UserData::from_data_iter(&mut data_iter)?;
-                BoardResponseData::GetUser(user)
+                BoardResponse::GetUser(user)
             }
             ADD_USER => { // AddUser
-                BoardResponseData::AddUser
+                BoardResponse::AddUser
             }
             
             _ => {return Err(DataError::InvalidDiscriminant)}
@@ -525,27 +508,27 @@ impl BoardResponseData {
 
     }
 
-    pub fn into_data(val: Result<Self, DataError>) -> Vec<u8> {
+    pub fn into_data(val: &MaybeBoardResponse) -> Vec<u8> {
         let mut out = Vec::new();
         Self::extend_data(val, &mut out);
         out
     }
 
-    pub fn extend_data(val: Result<Self, DataError>, data: &mut Vec<u8>) {
+    pub fn extend_data(val: &MaybeBoardResponse, data: &mut Vec<u8>) {
         data.push(RESPONSE_FORMAT_VERSION);
         match val {
-            Ok(BoardResponseData::GetEntry(entry)) => {
+            Ok(BoardResponse::GetEntry(entry)) => {
                 data.push(GET_ENTRY);
                 entry.extend_data(data);
             }
-            Ok(BoardResponseData::AddEntry) => {
+            Ok(BoardResponse::AddEntry) => {
                 data.push(ADD_ENTRY);
             }
-            Ok(BoardResponseData::GetUser(user)) => {
+            Ok(BoardResponse::GetUser(user)) => {
                 data.push(GET_USER);
                 user.extend_data(data);
             }
-            Ok(BoardResponseData::AddUser) => {
+            Ok(BoardResponse::AddUser) => {
                 data.push(ADD_USER);
             }
             Err(_) => { // TODO: should consider the error
