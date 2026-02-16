@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Instant, Duration};
 
 /// extended off of the user home
 const PATH_CONFIG: &str = ".config/message_board/path.txt";
@@ -370,8 +370,14 @@ impl Server {
             let mut clients_read = Vec::new();
             let mut read_id_set = HashSet::new();
             let mut to_remove = Vec::new();
+            let timer = Instant::now();
+            let mut iter_start_time = Duration::new(0, 0);
             loop {
-                std::hint::spin_loop();
+                let ideal_iter_start_time = iter_start_time + SERVER_MAINLOOP_PERIOD;
+                let elapsed = timer.elapsed();
+                if ideal_iter_start_time > elapsed {std::thread::sleep(ideal_iter_start_time - elapsed)}
+                iter_start_time = timer.elapsed();
+
                 for idx in 0..clients_read.len() {
                     let (id,  client): &mut (u64, TcpStream) = &mut clients_read[idx];
 
@@ -413,6 +419,8 @@ impl Server {
             let (response_tx, response_rx) = mpsc::channel();
             let num_threads = 4;
             let mut handler_threads = Vec::new();
+            let timer = Instant::now();
+            let mut iter_start_time = Duration::new(0, 0);
 
             for handler_id in 0..num_threads {
                 handler_threads.push(board.command_handler(response_tx.clone(), handler_id));
@@ -431,7 +439,11 @@ impl Server {
                     outgoing_queue_tx.send((client_id, data)).expect("The Outgoing Receiver should never drop");
                     num_active -= 1;
                 } else if num_active < num_threads {
-                    std::hint::spin_loop();
+                    let ideal_iter_start_time = iter_start_time + SERVER_MAINLOOP_PERIOD;
+                    let elapsed = timer.elapsed();
+                    if ideal_iter_start_time > elapsed {std::thread::sleep(ideal_iter_start_time - elapsed)}
+                    iter_start_time = timer.elapsed();
+
                     if let Ok((client_id, request)) = incoming_queue_rx.try_recv() {
                         let mut sent_to_handler = false;
                         for (client, handler) in handler_clients.iter_mut().zip(&mut handler_threads) {
@@ -466,9 +478,15 @@ impl Server {
         std::thread::spawn(move || {
             let mut clients_write: HashMap<u64, TcpStream> = HashMap::new();
             let mut unresolved_messages = Vec::new();
+            let timer = Instant::now();
+            let mut iter_start_time = Duration::new(0, 0);
 
             loop {
-                std::hint::spin_loop();
+                let ideal_iter_start_time = iter_start_time + SERVER_MAINLOOP_PERIOD;
+                let elapsed = timer.elapsed();
+                if ideal_iter_start_time > elapsed {std::thread::sleep(ideal_iter_start_time - elapsed)}
+                iter_start_time = timer.elapsed();
+                
                 for (id, message) in outgoing_queue_rx.try_iter() {
                     let Some(client) = clients_write.get_mut(&id) else {unresolved_messages.push((id, message)); continue;};
                     let _ = client.write_all(&BoardResponse::into_data(&message)); // should push to unresolved_messages
