@@ -14,3 +14,7 @@ name = "client"
 
 [[bin]]
 name = "server"
+
+[profile.profiling]
+inherits = "release"
+debug = true

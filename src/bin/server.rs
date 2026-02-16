@@ -6,10 +6,29 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 /// extended off of the user home
 const PATH_CONFIG: &str = ".config/message_board/path.txt";
+const ROOT_ENTRY_ID: u64 = 0;
 
+const SERVER_USER_ID: u64 = 0;
+const ADMIN_USER_ID: u64 = 1;
+const ANONYMOUS_USER_ID: u64 = 2;
+
+const SERVER_MAINLOOP_PERIOD: Duration = Duration::new(0, 1000000); // ie. 1 ms
+
+fn stdin_y_n(stdin: &mut std::io::Stdin, buffer: &mut String) -> bool {
+    loop {
+        let _ = stdin.read_line(buffer);
+        *buffer = buffer.trim().to_ascii_lowercase();
+        match buffer.as_ref() {
+            "y" => return true,
+            "n" => return false,
+            _ => continue
+        }
+    }
+}
 
 /// file format:
 /// 
@@ -24,8 +43,8 @@ const PATH_CONFIG: &str = ".config/message_board/path.txt";
 ///         see `lib.rs` for the entry file format
 /// 
 ///         special entry files:
-///             00000000:   the root entry, this entry *MUST* exist,
-///                         access group which is its own parent but not its own child with a white access base, 
+///             0:  the root entry, this entry *MUST* exist,
+///                                 access group which is its own parent but not its own child,
 ///           
 ///     `user_list`, a file of all the user ids:
 ///         user_id 1 (u64),
@@ -35,6 +54,12 @@ const PATH_CONFIG: &str = ".config/message_board/path.txt";
 ///     `users`, dir containing a file for each user:
 ///         each file is named after a user_id in hex,
 ///         see `lib.rs` for the user file format
+/// 
+///         special user ids:
+///             0:  the server itself, this id should never be associated with a human action
+///             1:  generic admin, this id should only be usable on the server itself and isn't beholden to standard permisions
+///             2:  anonymous, TBD
+///         
 ///         
 /// 
 
@@ -44,6 +69,104 @@ struct MessageBoard {
 
 #[allow(unused)]
 impl MessageBoard {
+    fn new() -> Self {
+        let user_home = std::env::home_dir().unwrap();
+        let mut real_path_config = user_home.clone();
+        real_path_config.push(PATH_CONFIG);
+        
+        let file_dir;
+        let mut stdin = std::io::stdin();
+        let mut stdout = std::io::stdout();
+        let mut input_buffer = String::new();
+        loop {
+            let file_dir_result = fs::read_to_string(&real_path_config);
+            if let Err(e) = file_dir_result {
+                match e.kind() {
+                    std::io::ErrorKind::NotFound => {
+                        print!("Config file does not exist, create a new one? (y/n): ");
+                        let _ = stdout.flush();
+                        input_buffer.clear();
+                        let create = stdin_y_n(&mut stdin, &mut input_buffer);
+                        if create {
+                            print!("Please enter the path for the message board's data: ");
+                            let _ = stdout.flush();
+                            loop {
+                                input_buffer.clear();
+                                let _ = stdin.read_line(&mut input_buffer);
+                                let mut parent = real_path_config.clone();
+                                parent.pop();
+                                if let Err(e) = fs::create_dir_all(parent) {
+                                    println!("Write error: {}", e);
+                                    continue;
+                                }
+                                if let Err(e) = fs::write(&real_path_config, input_buffer.trim()) {
+                                    println!("Write error: {}", e);
+                                }
+                            }
+                        } else {
+                            panic!("Cannot continue without a config file, terminating the server");
+                        }
+                    }
+                    _ => panic!("terminating due to non-specifc config file read error: {}", e.kind())
+                }
+            } else {
+                file_dir = PathBuf::from(file_dir_result.unwrap()).into_boxed_path();
+                break;
+            }
+        }
+    
+        let board = MessageBoard { file_dir };
+        
+        println!("MessageBoard config successfully established");
+        // checking / setting up the board files
+
+        let mut missing_files = false;
+        {
+            let mut path = PathBuf::from(board.file_dir.clone());
+            missing_files |= !path.exists();
+            path.push("entries");
+            missing_files |= !path.exists();
+            path.push(format!("{:016X}", ROOT_ENTRY_ID));
+            missing_files |= !path.exists();
+            path.pop();
+            path.pop();
+            path.push("users");
+            missing_files |= !path.exists();
+            path.pop();
+            path.push("user_list");
+            missing_files |= !path.exists();
+        }
+        if missing_files {
+            print!("MessageBoard is missing files at path. Create empty files as needed? (y/n): ");
+            let _ = stdout.flush();
+            input_buffer.clear();
+            let create = stdin_y_n(&mut stdin, &mut input_buffer);
+            if create {
+                let _ = fs::create_dir_all(&board.file_dir);
+                let mut path = PathBuf::from(board.file_dir.clone());
+                path.push("entries");
+                let _ = fs::create_dir(&path);
+                path.pop();
+                path.push("users");
+                let _ = fs::create_dir(&path);
+                path.pop();
+                path.push("user_list");
+                let _ = fs::File::create(path);
+
+                let default_root = Entry {
+                    header_data: HeaderData { version: ENTRY_FILE_VERSION, parent_id: ROOT_ENTRY_ID, children_ids: Vec::new(), author_id: SERVER_USER_ID },
+                    entry_data: EntryData::AccessGroup { name: String::from("Root"), access_base: AccessBase::White, whitelist_ids: Vec::new(), blacklist_ids: Vec::new() }
+                };
+                if board.write_entry(ROOT_ENTRY_ID, default_root).is_err_and(|e| if let DataError::AlreadyExists = e {false} else {true}){
+                    println!("failed to create root entry");
+                }
+            } else {
+                panic!("Cannot continue without board files, terminating the server");
+            }
+        }
+        board
+    }
+
     fn write_new<P: AsRef<Path>>(path: P, contents: &[u8]) -> Result<(), DataError> {
         fs::File::create_new(path).map_err(|_| DataError::AlreadyExists)?.write_all(contents).map_err(|_| DataError::InternalError)?;
         Ok(())
@@ -65,7 +188,7 @@ impl MessageBoard {
     /// may or may not be implemented in terms of `get_entry_data`
     fn get_entry_data_iter(&self, entry_id: u64) -> Result<impl Iterator<Item = u8>, DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
-        path.push(format!("entries/{:08X}", entry_id));
+        path.push(format!("entries/{:016X}", entry_id));
         let entry = std::fs::File::open(path).map_err(|_| DataError::DoesNotExist)?;
         Ok(BufReader::new(entry).bytes().filter_map(|x| x.ok())) // Scuff
     }
@@ -73,7 +196,7 @@ impl MessageBoard {
     /// encapsulation method to get a `UserData` of a `user_id`
     fn get_user(&self, user_id: u64) -> Result<UserData, DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
-        path.push(format!("users/{:08X}", user_id));
+        path.push(format!("users/{:016X}", user_id));
         UserData::from_data(&std::fs::read(path).map_err(|_| DataError::DoesNotExist)?)
     }
 
@@ -82,7 +205,7 @@ impl MessageBoard {
     /// requires that the entry_id doesn't currently exist
     fn write_entry(&self, entry_id: u64, entry: Entry) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
-        path.push(format!("entries/{:08X}", entry_id));
+        path.push(format!("entries/{:016X}", entry_id));
         Self::write_new(path, &entry.into_data())
     }
 
@@ -91,7 +214,7 @@ impl MessageBoard {
     /// requires that the entry_id currently exists
     fn overwrite_entry(&self, entry_id: u64, new_entry: Entry) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
-        path.push(format!("entries/{:08X}", entry_id));
+        path.push(format!("entries/{:016X}", entry_id));
         Self::overwrite_old(path, &new_entry.into_data())
     }
 
@@ -100,7 +223,7 @@ impl MessageBoard {
     /// requires that the user_id currently exists
     fn overwrite_user_data(&self, user_id: u64, new_data: UserData) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
-        path.push(format!("users/{:08X}", user_id));
+        path.push(format!("users/{:016X}", user_id));
         Self::overwrite_old(path, &new_data.into_data()) //FIXME: completely overwrites, even for small edits
     }
 
@@ -170,7 +293,7 @@ impl MessageBoard {
         user_list.write_all(&new_user_id.to_le_bytes()).map_err(|_| DataError::InternalError)?; // FIXME?: check if this could actually be meaningfully communicated
         path.clear();
         path.push(&self.file_dir);
-        path.push(format!("users/{:08X}", new_user_id));
+        path.push(format!("users/{:016X}", new_user_id));
         fs::File::create(&path).map_err(|_| DataError::AlreadyExists)?;
         Ok(())
     }
@@ -383,57 +506,7 @@ impl Server {
 }
 
 fn main() {
-    let user_home = std::env::home_dir().unwrap();
-    let mut real_path_config = user_home.clone();
-    real_path_config.push(PATH_CONFIG);
-
-    let file_dir;
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    let mut input_buffer = String::new();
-    loop {
-        let file_dir_result = fs::read_to_string(&real_path_config);
-        if let Err(e) = file_dir_result {
-            match e.kind() {
-                std::io::ErrorKind::NotFound => {
-                    print!("Config file does not exist, create a new one? (y/n): ");
-                    let _ = stdout.flush();
-                    input_buffer.clear();
-                    let _ = stdin.read_line(&mut input_buffer);
-                    input_buffer = input_buffer.trim().to_lowercase();
-                    if input_buffer == "y" {
-                        print!("Please enter the path for the message board's data: ");
-                        let _ = stdout.flush();
-                        loop {
-                            input_buffer.clear();
-                            let _ = stdin.read_line(&mut input_buffer);
-                            let mut parent = real_path_config.clone();
-                            parent.pop();
-                            if let Err(e) = fs::create_dir_all(parent) {
-                                println!("Write error: {}", e);
-                                continue;
-                            }
-                            if let Err(e) = fs::write(&real_path_config, input_buffer.trim()) {
-                                println!("Write error: {}", e);
-                            }
-                            
-                        }
-                    } else if input_buffer == "n" {
-                        println!("Cannot continue without a config file, terminating the server");
-                        return;
-                    }
-                }
-                _ => {println!("terminating due to non-specifc config file read error: {}", e.kind()); return;}
-            }
-        } else {
-            file_dir = PathBuf::from(file_dir_result.unwrap()).into_boxed_path();
-            break;
-        }
-    }
-
-    let board = MessageBoard { file_dir };
-    
-    println!("MessageBoard successfully established");
+    let board = MessageBoard::new();
 
     let server = Box::leak(Box::new( Server::new(board)));
     server.mainloop();
