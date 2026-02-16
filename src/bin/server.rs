@@ -387,7 +387,7 @@ impl Server {
                     let request_size = u64::from_le_bytes(request_size) as usize;
                     let mut request = vec![0u8; request_size + 8];
                     if client.read_exact(&mut request).is_err() {continue}; // should send some error
-                    let Ok(request) = BoardRequest::from_data(&request) else {continue}; // should send some error
+                    let Ok(request) = BoardRequest::from_data(&request[8..]) else {continue}; // should send some error
                     incomind_queue_tx.send((*id, request)).expect("Queue Rx should be alive");
                 }
 
@@ -486,10 +486,13 @@ impl Server {
                 let elapsed = timer.elapsed();
                 if ideal_iter_start_time > elapsed {std::thread::sleep(ideal_iter_start_time - elapsed)}
                 iter_start_time = timer.elapsed();
-                
+
                 for (id, message) in outgoing_queue_rx.try_iter() {
                     let Some(client) = clients_write.get_mut(&id) else {unresolved_messages.push((id, message)); continue;};
-                    let _ = client.write_all(&BoardResponse::into_data(&message)); // should push to unresolved_messages
+                    let message = BoardResponse::into_data(&message);
+                    println!("Sending {} byte message: {:?}", message.len(), message);
+                    let _ = client.write_all(&(message.len() as u64).to_le_bytes());
+                    let _ = client.write_all(&message); // should push to unresolved_messages
                 }
 
                 if let Ok(global_id_map) = client_id_map.try_read() {               
