@@ -567,6 +567,7 @@ impl Widget for &Client {
                             DataError::DoesNotExist => "DoesNotExist",
                             DataError::AlreadyExists => "AlreadyExists",
                             DataError::InsufficientPerms => "InsufficientPerms",
+                            DataError::BadCredentials => "BadCredentials",
 
                             DataError::MalformedRoot => "MalformedRoot",
                             DataError::NonChild => "NonChild ",

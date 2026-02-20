@@ -16,6 +16,8 @@ const SERVER_USER_ID: u64 = 0;
 const ADMIN_USER_ID: u64 = 1;
 const ANONYMOUS_USER_ID: u64 = 2;
 
+const SERVER_RESERVED_USER_IDS: [u64; 2] = [SERVER_USER_ID, ADMIN_USER_ID];
+
 const SERVER_MAINLOOP_PERIOD: Duration = Duration::new(0, 1000000); // ie. 1 ms
 
 fn stdin_y_n(stdin: &mut std::io::Stdin, buffer: &mut String) -> bool {
@@ -65,6 +67,8 @@ fn stdin_y_n(stdin: &mut std::io::Stdin, buffer: &mut String) -> bool {
 
 struct MessageBoard {
     file_dir: Box<Path>,
+    entry_ids: Arc<RwLock<HashSet<u64>>>,
+    user_ids: Arc<RwLock<HashSet<u64>>>,
 }
 
 #[allow(unused)]
@@ -115,7 +119,11 @@ impl MessageBoard {
             }
         }
     
-        let board = MessageBoard { file_dir };
+        let board = MessageBoard { 
+            file_dir,
+            entry_ids: Arc::new(RwLock::new(HashSet::new())),
+            user_ids: Arc::new(RwLock::new(HashSet::new())),
+        };
         
         println!("MessageBoard config successfully established");
         // checking / setting up the board files
@@ -132,9 +140,6 @@ impl MessageBoard {
             path.pop();
             path.push("users");
             missing_files |= !path.exists();
-            path.pop();
-            path.push("user_list");
-            missing_files |= !path.exists();
         }
         if missing_files {
             print!("MessageBoard is missing files at path. Create empty files as needed? (y/n): ");
@@ -149,9 +154,6 @@ impl MessageBoard {
                 path.pop();
                 path.push("users");
                 let _ = fs::create_dir(&path);
-                path.pop();
-                path.push("user_list");
-                let _ = fs::File::create(path);
 
                 let default_root = Entry {
                     header_data: HeaderData { version: ENTRY_FILE_VERSION, parent_id: ROOT_ENTRY_ID, children_ids: Vec::new(), author_id: SERVER_USER_ID },
@@ -164,6 +166,9 @@ impl MessageBoard {
                 panic!("Cannot continue without board files, terminating the server");
             }
         }
+
+        board.update_user_ids();
+        board.update_entry_ids();
         board
     }
 
@@ -228,13 +233,25 @@ impl MessageBoard {
     }
 
 
-    fn get_user_list(&self) -> Result<Vec<u64>, DataError> {
+    fn update_user_ids(&self) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
-        path.push("user_list");
-        let data = fs::read(path).map_err(|x| DataError::DoesNotExist)?;
-        let (data, remainder) = data.as_chunks::<8>();
-        if remainder.len() != 0 {return Err(DataError::InsufficientBytes)} // FIXME: questionable error
-        Ok(data.iter().map(|x| u64::from_le_bytes(*x)).collect::<Vec<_>>())
+        path.push("users");
+        let new = fs::read_dir(&path).map_err(|_| DataError::InternalError)?.map(|user_file| {
+            u64::from_str_radix(user_file.unwrap().file_name().to_str().unwrap(), 16).unwrap()
+        }).collect();
+        {
+            *self.user_ids.write().unwrap() = new;
+        }
+        Ok(())
+    }
+
+    fn update_entry_ids(&self) -> Result<(), DataError> {
+        let mut path = PathBuf::from(self.file_dir.clone());
+        path.push("entries");
+        *self.entry_ids.write().unwrap() = fs::read_dir(&path).map_err(|_| DataError::InternalError)?.map(|entry_file| {
+            u64::from_str_radix(entry_file.unwrap().file_name().to_str().unwrap(), 16).unwrap()
+        }).collect();
+        Ok(())
     }
 
     fn get_entry(&self, entry_id: u64) -> Result<Entry, DataError> {
@@ -251,7 +268,6 @@ impl MessageBoard {
         self.overwrite_user_data(user_id, user_data)?;
 
         self.write_entry(entry_id, entry)?;
-        println!("test3");
         Ok(())
     }
 
@@ -294,13 +310,8 @@ impl MessageBoard {
 
     fn add_user(&self, new_user_id: u64) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
-        path.push("user_list");
-        let mut user_list = std::fs::File::options().append(true).open(&path).map_err(|_| DataError::InternalError)?;
-        user_list.write_all(&new_user_id.to_le_bytes()).map_err(|_| DataError::InternalError)?; // FIXME?: check if this could actually be meaningfully communicated
-        path.clear();
-        path.push(&self.file_dir);
         path.push(format!("users/{:016X}", new_user_id));
-        fs::write(&path, UserData::new_empty().into_data()).map_err(|_| DataError::AlreadyExists)?;
+        Self::write_new(&path, &UserData::new_empty().into_data());
         Ok(())
     }
 
@@ -329,8 +340,7 @@ impl MessageBoard {
                         Ok(BoardResponse::GetUser(user))
                     }
                     BoardRequest::AddUser { user_id } => {
-                        let users = board.get_user_list()?;
-                        if users.contains(&user_id) {return Err(DataError::AlreadyExists.into())}
+                        if board.user_ids.read().unwrap().contains(&user_id) {return Err(DataError::AlreadyExists.into())}
                         board.add_user(user_id)?;
                         Ok(BoardResponse::AddUser)
                     }

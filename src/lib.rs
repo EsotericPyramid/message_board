@@ -42,6 +42,7 @@ pub enum DataError {
     DoesNotExist,
     AlreadyExists,
     InsufficientPerms,
+    BadCredentials,
 
     MalformedRoot,
     NonChild,
