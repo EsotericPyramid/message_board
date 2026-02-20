@@ -1,7 +1,7 @@
 use std::string::FromUtf8Error;
 
 pub const PORT: u16 = 8000;
-pub const ROOT_ID: u64 = 0x00_00_00_00;
+pub const ROOT_ID: u64 = 0x00_00_00_00_00_00_00_00;
 pub const ENTRY_MAGIC_NUMBER: u16 = 0x1234;
 pub const USER_MAGIC_NUMBER: u16 = 0x1470;
 
@@ -43,6 +43,9 @@ pub enum DataError {
     AlreadyExists,
     InsufficientPerms,
 
+    MalformedRoot,
+    NonChild,
+
     InternalError,
 }
 
@@ -78,8 +81,8 @@ fn read_u64(data_iter: &mut impl Iterator<Item = u8>) -> Result<u64, DataError> 
 
 #[derive(PartialEq, Eq, Debug)]
 pub struct Entry {
-    pub entry_data: EntryData,
     pub header_data: HeaderData,
+    pub entry_data: EntryData,
 }
 
 impl Entry {
@@ -293,6 +296,21 @@ impl EntryData {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum EntryVariant {
+    Message,
+    AccessGroup,
+}
+
+impl EntryVariant {
+    pub fn as_string(self) -> &'static str {
+        match self {
+            Self::Message => "Message",
+            Self::AccessGroup => "Access Group"
+        }
+    }
+}
+
 #[derive(PartialEq, Eq, Debug)]
 pub enum AccessBase {
     Inherit,
@@ -316,6 +334,10 @@ pub struct UserData {
 }
 
 impl UserData {
+    pub fn new_empty() -> Self {
+        UserData { entry_ids: Vec::new() }
+    }
+
     pub fn from_data(data: &[u8]) -> Result<Self, DataError> {
         Self::from_data_iter(&mut data.iter().copied())
     }
@@ -452,7 +474,6 @@ impl BoardRequest {
 }
 
 // the response 
-// TODO: move into server.rs
 
 
 #[derive(PartialEq, Eq, Debug)]
@@ -502,7 +523,10 @@ impl BoardResponse {
             ADD_USER => { // AddUser
                 BoardResponse::AddUser
             }
-            
+            ERROR => {
+                
+                return Err(DataError::InternalError);
+            }
             _ => {return Err(DataError::InvalidDiscriminant)}
         })
 
@@ -531,7 +555,8 @@ impl BoardResponse {
             Ok(BoardResponse::AddUser) => {
                 data.push(ADD_USER);
             }
-            Err(_) => { // TODO: should consider the error
+            Err(e) => { // TODO: should consider the error
+                eprintln!("Sending Error: {:?}", e);
                 data.push(ERROR);
             }
         }

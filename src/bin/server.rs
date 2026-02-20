@@ -242,10 +242,16 @@ impl MessageBoard {
     }
 
     fn add_entry(&self, user_id:u64, entry_id: u64, entry: Entry) -> Result<(), DataError> {
-        self.write_entry(entry_id, entry)?;
+        let mut parent = self.get_entry(entry.header_data.parent_id)?;
+        parent.header_data.children_ids.push(entry_id);
+        self.overwrite_entry(entry.header_data.parent_id, parent)?;
+        
         let mut user_data = self.get_user(user_id)?;
         user_data.entry_ids.push(entry_id);
         self.overwrite_user_data(user_id, user_data)?;
+
+        self.write_entry(entry_id, entry)?;
+        println!("test3");
         Ok(())
     }
 
@@ -289,12 +295,12 @@ impl MessageBoard {
     fn add_user(&self, new_user_id: u64) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push("user_list");
-        let mut user_list = std::fs::File::open(&path).map_err(|_| DataError::InternalError)?;
+        let mut user_list = std::fs::File::options().append(true).open(&path).map_err(|_| DataError::InternalError)?;
         user_list.write_all(&new_user_id.to_le_bytes()).map_err(|_| DataError::InternalError)?; // FIXME?: check if this could actually be meaningfully communicated
         path.clear();
         path.push(&self.file_dir);
         path.push(format!("users/{:016X}", new_user_id));
-        fs::File::create(&path).map_err(|_| DataError::AlreadyExists)?;
+        fs::write(&path, UserData::new_empty().into_data()).map_err(|_| DataError::AlreadyExists)?;
         Ok(())
     }
 
@@ -387,6 +393,7 @@ impl Server {
                     let request_size = u64::from_le_bytes(request_size) as usize;
                     let mut request = vec![0u8; request_size + 8];
                     if client.read_exact(&mut request).is_err() {continue}; // should send some error
+                    println!("Received {} byte message: {:02X?}", request_size, &request[8..]);
                     let Ok(request) = BoardRequest::from_data(&request[8..]) else {continue}; // should send some error
                     incomind_queue_tx.send((*id, request)).expect("Queue Rx should be alive");
                 }
@@ -490,7 +497,7 @@ impl Server {
                 for (id, message) in outgoing_queue_rx.try_iter() {
                     let Some(client) = clients_write.get_mut(&id) else {unresolved_messages.push((id, message)); continue;};
                     let message = BoardResponse::into_data(&message);
-                    println!("Sending {} byte message: {:?}", message.len(), message);
+                    println!("Sending {} byte message: {:02X?}", message.len(), message);
                     let _ = client.write_all(&(message.len() as u64).to_le_bytes());
                     let _ = client.write_all(&message); // should push to unresolved_messages
                 }
