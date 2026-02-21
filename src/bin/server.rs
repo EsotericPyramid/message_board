@@ -10,7 +10,8 @@ use std::time::{Instant, Duration};
 use rand::Rng;
 
 /// extended off of the user home
-const PATH_CONFIG: &str = ".config/message_board/path.txt";
+const RC_FILE: &str = ".config/message_board/server_rc.toml";
+
 const ROOT_ENTRY_ID: u64 = 0;
 
 const SERVER_USER_ID: u64 = 0;
@@ -76,49 +77,51 @@ struct MessageBoard {
 impl MessageBoard {
     fn new() -> Self {
         let user_home = std::env::home_dir().unwrap();
-        let mut real_path_config = user_home.clone();
-        real_path_config.push(PATH_CONFIG);
+        let mut real_rc_config = user_home.clone();
+        real_rc_config.push(RC_FILE);
         
-        let file_dir;
         let mut stdin = std::io::stdin();
         let mut stdout = std::io::stdout();
         let mut input_buffer = String::new();
-        loop {
-            let file_dir_result = fs::read_to_string(&real_path_config);
-            if let Err(e) = file_dir_result {
-                match e.kind() {
-                    std::io::ErrorKind::NotFound => {
-                        print!("Config file does not exist, create a new one? (y/n): ");
+        let mut rc_config_result = fs::read_to_string(&real_rc_config).map(|str| str.parse::<toml::Table>().expect("The Server Rc was misformatted"));
+        if let Err(e) = rc_config_result {
+            match e.kind() {
+                std::io::ErrorKind::NotFound => {
+                    print!("Config file does not exist, create a new one? (y/n): ");
+                    let _ = stdout.flush();
+                    input_buffer.clear();
+                    let create = stdin_y_n(&mut stdin, &mut input_buffer);
+                    if create {
+                        print!("Please enter the path for the message board's data: ");
                         let _ = stdout.flush();
-                        input_buffer.clear();
-                        let create = stdin_y_n(&mut stdin, &mut input_buffer);
-                        if create {
-                            print!("Please enter the path for the message board's data: ");
-                            let _ = stdout.flush();
-                            loop {
-                                input_buffer.clear();
-                                let _ = stdin.read_line(&mut input_buffer);
-                                let mut parent = real_path_config.clone();
-                                parent.pop();
-                                if let Err(e) = fs::create_dir_all(parent) {
-                                    println!("Write error: {}", e);
-                                    continue;
-                                }
-                                if let Err(e) = fs::write(&real_path_config, input_buffer.trim()) {
-                                    println!("Write error: {}", e);
-                                }
+                        loop {
+                            input_buffer.clear();
+                            let _ = stdin.read_line(&mut input_buffer);
+                            let mut parent = real_rc_config.clone();
+                            parent.pop();
+                            if let Err(e) = fs::create_dir_all(parent) {
+                                println!("Write error: {}", e);
+                                continue;
                             }
-                        } else {
-                            panic!("Cannot continue without a config file, terminating the server");
+                            let mut contents = toml::Table::new();
+                            contents.insert("path".to_string(), toml::Value::String(input_buffer.trim().to_string()));
+                            if let Err(e) = fs::write(&real_rc_config, &contents.to_string()) {
+                                println!("Write error: {}", e);
+                                continue;
+                            }
+                            rc_config_result = Ok(contents);
+                            break;
                         }
+                    } else {
+                        panic!("Cannot continue without a config file, terminating the server");
                     }
-                    _ => panic!("terminating due to non-specifc config file read error: {}", e.kind())
                 }
-            } else {
-                file_dir = PathBuf::from(file_dir_result.unwrap()).into_boxed_path();
-                break;
+                _ => panic!("terminating due to non-specifc config file read error: {}", e.kind())
             }
         }
+        let rc_config = rc_config_result.unwrap();
+        let file_dir = PathBuf::from(rc_config["path"].as_str().expect("\"path\" should be a string of the path to where files should be stored")).into_boxed_path();
+
     
         let board = MessageBoard { 
             file_dir,
@@ -414,7 +417,7 @@ impl Server {
                     let request_size = u64::from_le_bytes(request_size) as usize;
                     let mut request = vec![0u8; request_size + 8];
                     if client.read_exact(&mut request).is_err() {continue}; // should send some error
-                    println!("Received {} byte message: {:02X?}", request_size, &request[8..]);
+                    println!("Received {} byte message", request_size);
                     let Ok(request) = BoardRequest::from_data(&request[8..]) else {continue}; // should send some error
                     incomind_queue_tx.send((*id, request)).expect("Queue Rx should be alive");
                 }
@@ -518,7 +521,7 @@ impl Server {
                 for (id, message) in outgoing_queue_rx.try_iter() {
                     let Some(client) = clients_write.get_mut(&id) else {unresolved_messages.push((id, message)); continue;};
                     let message = BoardResponse::into_data(&message);
-                    println!("Sending {} byte message: {:02X?}", message.len(), message);
+                    println!("Sending {} byte message", message.len());
                     let _ = client.write_all(&(message.len() as u64).to_le_bytes());
                     let _ = client.write_all(&message); // should push to unresolved_messages
                 }
