@@ -393,20 +393,19 @@ impl UserData {
 /// 
 /// AddEntry, 01:
 ///     user_id (u64)
-///     entry_id (u64)
 ///     - Entry data - 
 /// 
 /// GetUser, 20:
 ///     user_id (u64)
 /// 
 /// AddUser, 21:
-///     user_id (u64)
+///     - no data -
 #[derive(PartialEq, Eq, Debug)]
 pub enum BoardRequest {
     GetEntry { user_id: u64, entry_id: u64 },
-    AddEntry { user_id: u64, entry_id: u64, entry: Entry },
+    AddEntry { user_id: u64, entry: Entry },
     GetUser { user_id: u64 },
-    AddUser { user_id: u64 },
+    AddUser,
 }
 
 impl BoardRequest {
@@ -424,9 +423,8 @@ impl BoardRequest {
             }
             ADD_ENTRY => { // AddEntry
                 let user_id = read_u64(data_iter)?;
-                let entry_id = read_u64(data_iter)?;
                 let entry = Entry::from_data_iter(data_iter)?;
-                BoardRequest::AddEntry { user_id, entry_id, entry }
+                BoardRequest::AddEntry { user_id, entry }
             }
             // user requests
             GET_USER => { // GetUser
@@ -434,8 +432,7 @@ impl BoardRequest {
                 BoardRequest::GetUser { user_id }
             }
             ADD_USER => { // AddUser
-                let user_id = read_u64(data_iter)?;
-                BoardRequest::AddUser { user_id }
+                BoardRequest::AddUser
             }
             
             _ => {return Err(DataError::InvalidDiscriminant)}
@@ -456,19 +453,17 @@ impl BoardRequest {
                 data.extend_from_slice(&user_id.to_le_bytes());
                 data.extend_from_slice(&entry_id.to_le_bytes());
             },
-            BoardRequest::AddEntry { user_id, entry_id, entry } => {
+            BoardRequest::AddEntry { user_id, entry } => {
                 data.push(ADD_ENTRY);
                 data.extend_from_slice(&user_id.to_le_bytes());
-                data.extend_from_slice(&entry_id.to_le_bytes());
                 entry.extend_data(data);
             },
             BoardRequest::GetUser { user_id } => {
                 data.push(GET_USER);
                 data.extend_from_slice(&user_id.to_le_bytes());
             },
-            BoardRequest::AddUser { user_id } => {
+            BoardRequest::AddUser => {
                 data.push(ADD_USER);
-                data.extend_from_slice(&user_id.to_le_bytes());
             },
         };
     }
@@ -480,9 +475,9 @@ impl BoardRequest {
 #[derive(PartialEq, Eq, Debug)]
 pub enum BoardResponse {
     GetEntry(Entry),
-    AddEntry,
+    AddEntry(u64),
     GetUser(UserData),
-    AddUser,
+    AddUser(u64),
 }
 
 pub type MaybeBoardResponse = Result<BoardResponse, DataError>;
@@ -495,13 +490,13 @@ pub type MaybeBoardResponse = Result<BoardResponse, DataError>;
 ///     - Entry Data -
 /// 
 /// AddEntry, 01:
-///     - No data -
+///     entry_id (u64)
 /// 
 /// GetUser, 20:
 ///     - User Data -
 /// 
 /// AddUser, 21:
-///     - No data -
+///     user_id (u64)
 impl BoardResponse {
     pub fn from_data(data: &[u8]) -> Result<Self, DataError> {
         let mut data_iter = data.iter().copied();
@@ -514,7 +509,8 @@ impl BoardResponse {
                 BoardResponse::GetEntry(entry)
             }
             ADD_ENTRY => { // AddEntry
-                BoardResponse::AddEntry
+                let entry_id = read_u64(&mut data_iter)?;
+                BoardResponse::AddEntry(entry_id)
             }
             // user requests
             GET_USER => { // GetUser
@@ -522,7 +518,8 @@ impl BoardResponse {
                 BoardResponse::GetUser(user)
             }
             ADD_USER => { // AddUser
-                BoardResponse::AddUser
+                let user_id = read_u64(&mut data_iter)?;
+                BoardResponse::AddUser(user_id)
             }
             ERROR => {
                 
@@ -546,15 +543,17 @@ impl BoardResponse {
                 data.push(GET_ENTRY);
                 entry.extend_data(data);
             }
-            Ok(BoardResponse::AddEntry) => {
+            Ok(BoardResponse::AddEntry(entry_id)) => {
                 data.push(ADD_ENTRY);
+                data.extend_from_slice(&entry_id.to_le_bytes());
             }
             Ok(BoardResponse::GetUser(user)) => {
                 data.push(GET_USER);
                 user.extend_data(data);
             }
-            Ok(BoardResponse::AddUser) => {
+            Ok(BoardResponse::AddUser(user_id)) => {
                 data.push(ADD_USER);
+                data.extend_from_slice(&user_id.to_le_bytes());
             }
             Err(e) => { // TODO: should consider the error
                 eprintln!("Sending Error: {:?}", e);

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, Duration};
+use rand::Rng;
 
 /// extended off of the user home
 const PATH_CONFIG: &str = ".config/message_board/path.txt";
@@ -187,6 +188,14 @@ impl MessageBoard {
         Ok(())
     }
 
+    fn generate_unique_id<>(mut rng: impl Rng, used_ids: &HashSet<u64>) -> u64 {
+        let mut rand_num = rng.next_u64();
+        while used_ids.contains(&rand_num) {
+            rand_num += 1;
+        }
+        rand_num
+    }
+
     /// encapsulation method to get the raw, unparsed data of an entry in the form of an iter
     /// use is generally prefered over `get_entry_data`
     /// 
@@ -319,7 +328,7 @@ impl MessageBoard {
     fn command_handler(&'static self, response_tx: mpsc::Sender<(u64, MaybeBoardResponse)>, handler_id: u64) -> mpsc::Sender<BoardRequest> {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            fn handle_request(board: &MessageBoard, request: BoardRequest) -> MaybeBoardResponse {
+            fn handle_request(board: &MessageBoard, rng: impl Rng, request: BoardRequest) -> MaybeBoardResponse {
                 match request {
                     BoardRequest::GetEntry { user_id, entry_id} => {
                         let entry = board.get_entry(entry_id)?;
@@ -328,29 +337,31 @@ impl MessageBoard {
                         }
                         Ok(BoardResponse::GetEntry(entry))
                     }
-                    BoardRequest::AddEntry { user_id , entry_id , entry} => {
+                    BoardRequest::AddEntry { user_id , entry} => {
                         if !board.has_access_perm(user_id, entry.header_data.parent_id)? {
                             return Err(DataError::InsufficientPerms.into())
                         }
+                        let entry_id = MessageBoard::generate_unique_id(rng, &board.entry_ids.read().unwrap());
                         board.add_entry(user_id, entry_id, entry)?;
-                        Ok(BoardResponse::AddEntry)
+                        Ok(BoardResponse::AddEntry(entry_id))
                     }
                     BoardRequest::GetUser { user_id } => {
                         let user = board.get_user(user_id)?;
                         Ok(BoardResponse::GetUser(user))
                     }
-                    BoardRequest::AddUser { user_id } => {
-                        if board.user_ids.read().unwrap().contains(&user_id) {return Err(DataError::AlreadyExists.into())}
+                    BoardRequest::AddUser => {
+                        let user_id = MessageBoard::generate_unique_id(rng, &board.user_ids.read().unwrap());
                         board.add_user(user_id)?;
-                        Ok(BoardResponse::AddUser)
+                        Ok(BoardResponse::AddUser(user_id))
                     }
                 }
             }
 
+            let mut rng = rand::rng();
             for request in rx {
                 let response = (
                     handler_id,
-                    handle_request(&self, request),
+                    handle_request(&self, &mut rng, request),
                 );
                 let _ = response_tx.send(response);
             }

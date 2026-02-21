@@ -21,7 +21,7 @@ fn extract_name(entry_id: u64, entry: &Entry) -> String {
     #[allow(unreachable_patterns)]
     match &entry.entry_data {
         EntryData::AccessGroup { name, access_base: _, whitelist_ids: _, blacklist_ids: _ } => name.clone(),
-        EntryData::Message { timestamp: _, message: _ } => entry_id.to_string(),
+        EntryData::Message { timestamp: _, message: _ } => format!("{:016X}", entry_id),
         _ => entry_id.to_string(),
     }
 }
@@ -211,7 +211,7 @@ impl Widget for &EntryViewer {
                 match &entry.entry_data {
                     EntryData::Message { timestamp, message } => {
                         title.push_span(" Message by ");
-                        title.push_span(entry.header_data.author_id.to_string());
+                        title.push_span(format!("{:016X}", entry.header_data.author_id));
                         title.push_span(" ");
 
                         Paragraph::new(message as &str).render(inner_area, buf);
@@ -304,6 +304,7 @@ struct Client {
 
     stream: TcpStream,
     user_id: u64,
+
     exit: bool,
 }
 
@@ -318,6 +319,19 @@ impl Client {
                 println!("Connection failed: {}", e);
             }
         }
+        
+        // TODO: temp, should read from a config file
+        let user_id;
+        {
+            let mut stdout = std::io::stdout();
+            let mut stdin = std::io::stdin();
+            print!("Enter your user_id: ");
+            stdout.flush();
+            let mut buf = String::new();
+            stdin.read_line(&mut buf);
+            user_id = buf.trim().parse::<u64>().unwrap();
+        }
+
         let terminal = ratatui::init();
         let mut client = Self { 
             terminal: Some(terminal),
@@ -328,14 +342,14 @@ impl Client {
             viewer: EntryViewer::new(),
 
             stream: connected_stream.unwrap(),
-            user_id: 0,
+            user_id,
             exit: false,
         };
         
         let entry = client.get_entry(ROOT_ID)?;
         client.path.push(ROOT_ID, &entry)?;
         client.set_active_entry(entry);
-        let _ = client.add_self_user();
+        let _ = client.create_user(); // FIXME: should notify in some way if a new one was minted
 
         Ok(client)
     }
@@ -360,11 +374,11 @@ impl Client {
     }
 
     // FIXME: This *REALLY* shouldn't set the entry_id
-    fn write_entry(&mut self, entry_id: u64, entry: Entry) -> Result<(), DataError> {
-        let request = BoardRequest::AddEntry { user_id: self.user_id, entry_id, entry: entry };
+    fn write_entry(&mut self, entry: Entry) -> Result<u64, DataError> {
+        let request = BoardRequest::AddEntry { user_id: self.user_id, entry: entry };
         let response = self.send_request(request)?;
-        let BoardResponse::AddEntry = response else {return Err(DataError::InternalError)};
-        Ok(())
+        let BoardResponse::AddEntry(entry_id) = response else {return Err(DataError::InternalError)};
+        Ok(entry_id)
     }
 
     fn set_active_entry(&mut self, entry: Entry) {
@@ -372,10 +386,20 @@ impl Client {
         self.viewer.add_entry(entry);
     }
 
-    fn add_self_user(&mut self) -> Result<(), DataError> {
-        let request = BoardRequest::AddUser { user_id: self.user_id };
+    fn get_user(&mut self, user_id: u64) -> Result<UserData, DataError> {
+        let request = BoardRequest::GetUser { user_id };
         let response = self.send_request(request)?;
-        let BoardResponse::AddUser = response else {return Err(DataError::InternalError)};
+        let BoardResponse::GetUser(user) = response else {return Err(DataError::InternalError)};
+        Ok(user)
+    }
+
+    fn create_user(&mut self) -> Result<(), DataError> {
+        // scuffed //_and(|e| if let DataError::DoesNotExist = e {true} else {false})
+        if !self.get_user(self.user_id).is_err() {return Ok(())}
+        let request = BoardRequest::AddUser;
+        let response = self.send_request(request)?;
+        let BoardResponse::AddUser(user_id) = response else {return Err(DataError::InternalError)};
+        self.user_id = user_id;
         Ok(())
     }
 
@@ -501,7 +525,7 @@ impl Client {
                             }
                         };
                         if let Some(entry) = entry {
-                            let result = self.write_entry(1337, entry);
+                            let result = self.write_entry(entry);
                             if let Err(e) = result {
                                 self.state.push(ClientState::Write(selector));
                                 return ClientState::Error(vec![e]);

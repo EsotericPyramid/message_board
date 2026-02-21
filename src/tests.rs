@@ -73,17 +73,15 @@ fn rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>) -> 
         }
         1 => {
             let user_id = rng.next_u64();
-            let entry_id = rng.next_u64();
             let entry = rand_entry(&mut rng, &mut char_rng);
-            BoardRequest::AddEntry { user_id, entry_id, entry }
+            BoardRequest::AddEntry { user_id, entry }
         }
         2 => {
             let user_id = rng.next_u64();
             BoardRequest::GetUser { user_id }
         }
         3 => {
-            let user_id = rng.next_u64();
-            BoardRequest::AddUser { user_id }
+            BoardRequest::AddUser
         }
         _ => panic!("Request Type should be in range")
     };
@@ -96,13 +94,13 @@ fn rand_response(mut rng: impl Rng, char_rng: impl Iterator<Item = char>) -> May
             Ok(BoardResponse::GetEntry(rand_entry(rng, char_rng)))
         }
         1 => {
-            Ok(BoardResponse::AddEntry)
+            Ok(BoardResponse::AddEntry(rng.next_u64()))
         }
         2 => {
             Ok(BoardResponse::GetUser(rand_user(rng, char_rng)))
         }
         3 => {
-            Ok(BoardResponse::AddUser)
+            Ok(BoardResponse::AddUser(rng.next_u64()))
         }
         _ => panic!("Request Type should be in range")
     }
