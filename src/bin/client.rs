@@ -11,11 +11,14 @@ use ratatui::{
     layout::Rect,
     buffer::Buffer,
 };
+use message_board::utils::*;
 
 const ENTRY_VARIANTS: [EntryVariant; 2] = [
     EntryVariant::Message,
     EntryVariant::AccessGroup,
 ];
+
+const RC_FILE: &str = ".config/message_board/client_rc.toml";
 
 fn extract_name(entry_id: u64, entry: &Entry) -> String {
     #[allow(unreachable_patterns)]
@@ -303,33 +306,61 @@ struct Client {
     viewer: EntryViewer,
 
     stream: TcpStream,
-    user_id: u64,
+    user_id: Option<u64>,
 
     exit: bool,
 }
 
 impl Client {
     fn new() -> Result<Self, DataError> {
+        let user_home = std::env::home_dir().unwrap();
+        let mut real_rc_config = user_home.clone();
+        real_rc_config.push(RC_FILE);
+        let mut stdin = std::io::stdin();
+        let mut stdout = std::io::stdout();
+        let mut input_buffer = String::new();
+        let mut rc_config_result = std::fs::read_to_string(&real_rc_config).map(|str| str.parse::<toml::Table>().expect("The Client Rc was misformatted"));
+        if let Err(ref e) = rc_config_result {
+            match e.kind() {
+                std::io::ErrorKind::NotFound => {
+                    print!("Config file does not exist, create a new one? (y/n): ");
+                    let _ = stdout.flush();
+                    input_buffer.clear();
+                    let create = stdin_y_n(&mut stdin, &mut input_buffer);
+                    if create {
+                        let mut config = toml::Table::new();
+                        print!("Please enter the message board's address: ");
+                        let _ = stdout.flush();
+                        let mut server_address = String::new();
+                        let _ = stdin.read_line(&mut server_address);
+                        config.insert("address".to_string(), toml::Value::String(server_address.trim().to_string()));
+                        config.insert("user_id".to_string(), toml::Value::String("None".to_string()));
+                        let _ = std::fs::write(real_rc_config, &config.to_string());
+                        rc_config_result = Ok(config);
+                    } else {
+                        panic!("Cannot continue without a config file, terminating the client");
+                    }
+                }
+                _ => panic!("terminating due to non-specifc config file read error: {}", e.kind())
+            }
+        }
+        let rc_config = rc_config_result.unwrap();
+        let user_id_val = &rc_config["user_id"];
+        let user_id = match user_id_val {
+            toml::Value::Integer(id) => Some(*id as u64), //scuff
+            toml::Value::String(str) if str == "None" => None,
+            _ => {panic!("The client RC file was misformatted")}
+        };
+        let toml::Value::String(server_address) = &rc_config["address"] else {panic!("The client RC file was misformatted")};
+
         let mut connected_stream = None;
         while connected_stream.is_none() {
-            let stream = TcpStream::connect(String::from("127.0.0.1:") + &PORT.to_string());
+            let stream = TcpStream::connect((server_address as &str, PORT));
             if let Ok(stream) = stream {
                 connected_stream = Some(stream);
             } else if let Err(e) = stream {
                 println!("Connection failed: {}", e);
             }
-        }
-        
-        // TODO: temp, should read from a config file
-        let user_id;
-        {
-            let mut stdout = std::io::stdout();
-            let mut stdin = std::io::stdin();
-            print!("Enter your user_id: ");
-            stdout.flush();
-            let mut buf = String::new();
-            stdin.read_line(&mut buf);
-            user_id = buf.trim().parse::<u64>().unwrap();
         }
 
         let terminal = ratatui::init();
@@ -346,12 +377,23 @@ impl Client {
             exit: false,
         };
         
+        let _ = client.create_user(); // FIXME: should notify in some way if a new one was minted
         let entry = client.get_entry(ROOT_ID)?;
         client.path.push(ROOT_ID, &entry)?;
         client.set_active_entry(entry);
-        let _ = client.create_user(); // FIXME: should notify in some way if a new one was minted
 
         Ok(client)
+    }
+
+    fn edit_config<F: FnOnce(&mut toml::Table)>(&mut self, f: F) {
+        let user_home = std::env::home_dir().unwrap();
+        let mut real_rc_config = user_home.clone();
+        real_rc_config.push(RC_FILE);
+
+        let mut config = std::fs::read_to_string(&real_rc_config)
+            .map(|str| str.parse::<toml::Table>().expect("The Server Rc was misformatted")).unwrap();
+        f(&mut config);
+        let _ = std::fs::write(&real_rc_config, &config.to_string());
     }
 
     fn send_request(&mut self, request: BoardRequest) -> Result<BoardResponse, DataError> {
@@ -367,15 +409,14 @@ impl Client {
     }
 
     fn get_entry(&mut self, entry_id: u64) -> Result<Entry, DataError> {
-        let request = BoardRequest::GetEntry { user_id: self.user_id, entry_id };
+        let request = BoardRequest::GetEntry { user_id: self.user_id.unwrap(), entry_id };
         let response = self.send_request(request)?;
         let BoardResponse::GetEntry(entry) = response else {return Err(DataError::InternalError)};
         Ok(entry)
     }
 
-    // FIXME: This *REALLY* shouldn't set the entry_id
     fn write_entry(&mut self, entry: Entry) -> Result<u64, DataError> {
-        let request = BoardRequest::AddEntry { user_id: self.user_id, entry: entry };
+        let request = BoardRequest::AddEntry { user_id: self.user_id.unwrap(), entry: entry };
         let response = self.send_request(request)?;
         let BoardResponse::AddEntry(entry_id) = response else {return Err(DataError::InternalError)};
         Ok(entry_id)
@@ -393,14 +434,14 @@ impl Client {
         Ok(user)
     }
 
-    fn create_user(&mut self) -> Result<(), DataError> {
-        // scuffed //_and(|e| if let DataError::DoesNotExist = e {true} else {false})
-        if !self.get_user(self.user_id).is_err() {return Ok(())}
+    fn create_user(&mut self) -> Result<bool, DataError> {
+        if let Some(_) = self.user_id {return Ok(false)}
         let request = BoardRequest::AddUser;
         let response = self.send_request(request)?;
         let BoardResponse::AddUser(user_id) = response else {return Err(DataError::InternalError)};
-        self.user_id = user_id;
-        Ok(())
+        self.user_id = Some(user_id);
+        self.edit_config(|config| config["user_id"] = toml::Value::Integer(user_id as i64));
+        Ok(true)
     }
 
     fn mainloop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -507,12 +548,13 @@ impl Client {
                                 let Ok(_) = child.wait() else {break 'block};
                                 self.terminal = Some(ratatui::init());
                                 let Ok(message) = std::fs::read_to_string(&path) else {break 'block};
+                                let _ = std::fs::remove_file(&path);
                                 Some(Entry {
                                     header_data: HeaderData { 
                                         version: ENTRY_FILE_VERSION, 
                                         parent_id: self.path.peek().0, 
                                         children_ids: Vec::new(), 
-                                        author_id: self.user_id, 
+                                        author_id: self.user_id.unwrap(), 
                                     },
                                     entry_data: EntryData::Message { 
                                         timestamp: std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap().as_secs(), 
@@ -549,6 +591,14 @@ impl Client {
 
 impl Widget for &Client {
     fn render(self, area: Rect, buf: &mut Buffer)where Self: Sized {
+        let layout = Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).split(area);
+        {
+            let mut title_line = Line::from(" Message Board - User: ");
+            title_line.push_span(format!("{:016X}", self.user_id.unwrap()));
+            title_line.push_span(" ");
+            title_line.centered().render(layout[0], buf);
+        }
+        let area = layout[1];
         for sub_state in &self.state {
             match sub_state {
                 ClientState::Viewer(_) => {

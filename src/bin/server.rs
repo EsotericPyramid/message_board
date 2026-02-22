@@ -8,6 +8,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, Duration};
 use rand::Rng;
+use message_board::utils::*;
 
 /// extended off of the user home
 const RC_FILE: &str = ".config/message_board/server_rc.toml";
@@ -22,17 +23,7 @@ const SERVER_RESERVED_USER_IDS: [u64; 2] = [SERVER_USER_ID, ADMIN_USER_ID];
 
 const SERVER_MAINLOOP_PERIOD: Duration = Duration::new(0, 1000000); // ie. 1 ms
 
-fn stdin_y_n(stdin: &mut std::io::Stdin, buffer: &mut String) -> bool {
-    loop {
-        let _ = stdin.read_line(buffer);
-        *buffer = buffer.trim().to_ascii_lowercase();
-        match buffer.as_ref() {
-            "y" => return true,
-            "n" => return false,
-            _ => continue
-        }
-    }
-}
+
 
 /// file format:
 /// 

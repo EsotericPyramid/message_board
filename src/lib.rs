@@ -31,6 +31,20 @@ pub const BLACK_BASE: u8 = 0x02;
 #[cfg(test)]
 pub mod tests;
 
+pub mod utils {
+    pub fn stdin_y_n(stdin: &mut std::io::Stdin, buffer: &mut String) -> bool {
+    loop {
+        let _ = stdin.read_line(buffer);
+        *buffer = buffer.trim().to_ascii_lowercase();
+        match buffer.as_ref() {
+            "y" => return true,
+            "n" => return false,
+            _ => continue
+        }
+    }
+}
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum DataError { 
     IncorrectMagicNum,
