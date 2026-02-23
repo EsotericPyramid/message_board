@@ -292,7 +292,7 @@ enum ViewerState {
 
 enum ClientState {
     Viewer(ViewerState),
-    Write(Selector<EntryVariant>),
+    WriteVarientSelection(Selector<EntryVariant>),
     Blank,
     Error(Vec<DataError>),
 }
@@ -335,6 +335,10 @@ impl Client {
                         let _ = stdin.read_line(&mut server_address);
                         config.insert("address".to_string(), toml::Value::String(server_address.trim().to_string()));
                         config.insert("user_id".to_string(), toml::Value::String("None".to_string()));
+
+                        let mut parent = real_rc_config.clone();
+                        parent.pop();
+                        let _ = std::fs::create_dir_all(parent);
                         let _ = std::fs::write(real_rc_config, &config.to_string());
                         rc_config_result = Ok(config);
                     } else {
@@ -505,7 +509,7 @@ impl Client {
                         self.state.push(state);
                         let mut selector = Selector::new(Vec::from(ENTRY_VARIANTS));
                         selector.select();
-                        return ClientState::Write(selector);
+                        return ClientState::WriteVarientSelection(selector);
                     }
                     (KeyCode::Char('H') | KeyCode::Left, _) if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
                         self.path.pop();
@@ -528,7 +532,7 @@ impl Client {
                 }
                 state
             }
-            ClientState::Write(mut selector) => {
+            ClientState::WriteVarientSelection(mut selector) => {
                 match key_event.code {
                     KeyCode::Char('k') | KeyCode::Up => {selector.up();}
                     KeyCode::Char('j') | KeyCode::Down => {selector.down();}
@@ -569,7 +573,7 @@ impl Client {
                         if let Some(entry) = entry {
                             let result = self.write_entry(entry);
                             if let Err(e) = result {
-                                self.state.push(ClientState::Write(selector));
+                                self.state.push(ClientState::WriteVarientSelection(selector));
                                 return ClientState::Error(vec![e]);
                             }
                             return ClientState::Blank;
@@ -577,7 +581,7 @@ impl Client {
                     }
                     _ => {}
                 }
-                ClientState::Write(selector)
+                ClientState::WriteVarientSelection(selector)
             }
             ClientState::Error(_) => {
                 return ClientState::Blank;
@@ -613,7 +617,7 @@ impl Widget for &Client {
                     self.navigator.render(navigator_area, buf);
                     self.viewer.render(content_area, buf);
                 }
-                ClientState::Write(selector) => {
+                ClientState::WriteVarientSelection(selector) => {
                     let mut layout = Layout::horizontal([Constraint::Fill(1), Constraint::Percentage(50), Constraint::Fill(1)]).split(area);
                     layout = Layout::vertical([Constraint::Fill(1), Constraint::Percentage(50), Constraint::Fill(1)]).split(layout[1]);
                     let selector_popup_area = layout[1];

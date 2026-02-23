@@ -59,6 +59,7 @@ const SERVER_MAINLOOP_PERIOD: Duration = Duration::new(0, 1000000); // ie. 1 ms
 /// 
 
 struct MessageBoard {
+    address: String,
     file_dir: Box<Path>,
     entry_ids: Arc<RwLock<HashSet<u64>>>,
     user_ids: Arc<RwLock<HashSet<u64>>>,
@@ -83,26 +84,24 @@ impl MessageBoard {
                     input_buffer.clear();
                     let create = stdin_y_n(&mut stdin, &mut input_buffer);
                     if create {
+                        let mut contents = toml::Table::new();
                         print!("Please enter the path for the message board's data: ");
                         let _ = stdout.flush();
-                        loop {
-                            input_buffer.clear();
-                            let _ = stdin.read_line(&mut input_buffer);
-                            let mut parent = real_rc_config.clone();
-                            parent.pop();
-                            if let Err(e) = fs::create_dir_all(parent) {
-                                println!("Write error: {}", e);
-                                continue;
-                            }
-                            let mut contents = toml::Table::new();
-                            contents.insert("path".to_string(), toml::Value::String(input_buffer.trim().to_string()));
-                            if let Err(e) = fs::write(&real_rc_config, &contents.to_string()) {
-                                println!("Write error: {}", e);
-                                continue;
-                            }
-                            rc_config_result = Ok(contents);
-                            break;
-                        }
+                        input_buffer.clear();
+                        let _ = stdin.read_line(&mut input_buffer);
+                        contents.insert("path".to_string(), toml::Value::String(input_buffer.trim().to_string()));
+
+                        print!("Please enter the IP address / host name for the message board: ");
+                        let _ = stdout.flush();
+                        input_buffer.clear();
+                        let _ = stdin.read_line(&mut input_buffer);
+                        contents.insert("address".to_string(), toml::Value::String(input_buffer.trim().to_string()));
+
+                        let mut parent = real_rc_config.clone();
+                        parent.pop();
+                        if let Err(e) = fs::create_dir_all(parent) {panic!("Failed to create the ~/.config/message_board directory: {}", e)};
+                        if let Err(e) = fs::write(&real_rc_config, &contents.to_string()) {panic!("Failed to write the config file: {}", e)};
+                        rc_config_result = Ok(contents);
                     } else {
                         panic!("Cannot continue without a config file, terminating the server");
                     }
@@ -112,9 +111,10 @@ impl MessageBoard {
         }
         let rc_config = rc_config_result.unwrap();
         let file_dir = PathBuf::from(rc_config["path"].as_str().expect("\"path\" should be a string of the path to where files should be stored")).into_boxed_path();
-
+        let address = rc_config["address"].as_str().expect("\"path\" should be a string of the path to where files should be stored").to_string();
     
         let board = MessageBoard { 
+            address,
             file_dir,
             entry_ids: Arc::new(RwLock::new(HashSet::new())),
             user_ids: Arc::new(RwLock::new(HashSet::new())),
@@ -550,11 +550,11 @@ impl Server {
 
 fn main() {
     let board = MessageBoard::new();
+    let listener = TcpListener::bind((&board.address as &str, PORT)).unwrap();
 
     let server = Box::leak(Box::new( Server::new(board)));
     server.mainloop();
 
-    let listener = TcpListener::bind(String::from("127.0.0.1:") + &PORT.to_string()).unwrap();
     for stream in listener.incoming() {
         if let Ok(stream) = stream {
             println!("Connection recieved");
