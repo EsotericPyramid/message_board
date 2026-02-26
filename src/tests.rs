@@ -9,7 +9,39 @@ fn get_char_rng(rng: impl Rng) -> impl Iterator<Item = char> {
     rand::distr::Uniform::try_from(RANDOM_CHAR_RANGE).unwrap().sample_iter(rng)
 }
 
-fn rand_entry(mut rng: impl Rng, char_rng: impl Iterator<Item = char>) -> Entry {
+fn rand_defaulted_id_set(mut rng: impl Rng, _char_rng: impl Iterator<Item = char>) -> DefaultedIdSet {
+    let default_base = match rng.random_range(0..3) {
+        0 => DefaultBase::Inherit,
+        1 => DefaultBase::White,
+        2 => DefaultBase::Black,
+        _ => panic!("access base type should be in range")
+    };
+
+    match default_base {
+        DefaultBase::Inherit => {
+            let num_whitelisted = rng.random_range(10..1000);
+            let num_blacklisted = rng.random_range(10..1000);
+            DefaultedIdSet::Inherit { 
+                whitelist_ids: (&mut rng).random_iter().take(num_whitelisted).collect(), 
+                blacklist_ids: (&mut rng).random_iter().take(num_blacklisted).collect(),
+            }
+        }
+        DefaultBase::Black => {
+            let num_whitelisted = rng.random_range(10..1000);
+            DefaultedIdSet::Black {
+                whitelist_ids: (&mut rng).random_iter().take(num_whitelisted).collect(),
+            }
+        }
+        DefaultBase::White => {
+            let num_blacklisted = rng.random_range(10..1000);
+            DefaultedIdSet::White { 
+                blacklist_ids: (&mut rng).random_iter().take(num_blacklisted).collect(),
+            }
+        }
+    }
+}
+
+fn rand_entry(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>) -> Entry {
     let mut children_ids = Vec::new();
     for _ in 0..rng.random_range(1..100) {
         children_ids.push(rng.next_u64());
@@ -23,19 +55,10 @@ fn rand_entry(mut rng: impl Rng, char_rng: impl Iterator<Item = char>) -> Entry 
             }
         }
         1 => {
-            let access_base = match rng.random_range(0..3) {
-                0 => AccessBase::Inherit,
-                1 => AccessBase::White,
-                2 => AccessBase::Black,
-                _ => panic!("access base type should be in range")
-            };
-            let num_whitelisted = rng.random_range(10..1000);
-            let num_blacklisted = rng.random_range(10..1000);
             EntryData::AccessGroup { 
-                name: char_rng.take(rng.random_range(100..10000)).collect(), 
-                access_base, 
-                whitelist_ids: (&mut rng).random_iter().take(num_whitelisted).collect(), 
-                blacklist_ids: (&mut rng).random_iter().take(num_blacklisted).collect(),
+                name: (&mut char_rng).take(rng.random_range(100..10000)).collect(), 
+                write_perms: rand_defaulted_id_set(&mut rng, &mut char_rng),
+                read_perms: rand_defaulted_id_set(&mut rng, &mut char_rng),
             }
         }
         _ => panic!("entry type should be in range")

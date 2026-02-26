@@ -152,7 +152,7 @@ impl MessageBoard {
 
                 let default_root = Entry {
                     header_data: HeaderData { version: ENTRY_FILE_VERSION, parent_id: ROOT_ENTRY_ID, children_ids: Vec::new(), author_id: SERVER_USER_ID },
-                    entry_data: EntryData::AccessGroup { name: String::from("Root"), access_base: AccessBase::White, whitelist_ids: Vec::new(), blacklist_ids: Vec::new() }
+                    entry_data: EntryData::AccessGroup { name: String::from("Root"), write_perms: DefaultedIdSet::White { blacklist_ids: Vec::new() }, read_perms: DefaultedIdSet::White { blacklist_ids: Vec::new() }}
                 };
                 if board.write_entry(ROOT_ENTRY_ID, default_root).is_err_and(|e| if let DataError::AlreadyExists = e {false} else {true}){
                     println!("failed to create root entry");
@@ -274,8 +274,8 @@ impl MessageBoard {
         Ok(())
     }
 
-    /// checks if the user has perms to the *children* of the entry
-    fn has_access_perm(&self, user_id: u64, entry_id: u64) -> Result<bool, DataError> {
+    /// checks if the user has read_perms to the *children* of the entry
+    fn has_read_perm(&self, user_id: u64, entry_id: u64) -> Result<bool, DataError> {
         let mut data_iter = self.get_entry_data_iter(entry_id)?;
         let (mut header, mut entry_type) = HeaderData::from_data_iter(&mut data_iter)?;
         let mut current_id = entry_id;
@@ -283,21 +283,40 @@ impl MessageBoard {
             if entry_type == ACCESS_GROUP {
                 let EntryData::AccessGroup {
                     name: _,
-                    access_base,
-                    whitelist_ids,
-                    blacklist_ids,
+                    write_perms: _,
+                    read_perms,
                 } = EntryData::from_data_iter(&mut data_iter, entry_type)? else {panic!("EntryData read as an AccessGroup should match an AccessGroup")};
 
-                if whitelist_ids.contains(&user_id) {
-                    return Ok(true);
-                } else if blacklist_ids.contains(&user_id) {
-                    return Ok(false);
+                if let Some(has_perm) = read_perms.contains(user_id) {
+                    return Ok(has_perm);
                 }
+            }
+            if current_id == ROOT_ID {
+                break;
+            }
+            current_id = header.parent_id;
+            let mut data_iter = self.get_entry_data_iter(header.parent_id)?;
+            (header, entry_type) = HeaderData::from_data_iter(&mut data_iter)?;
+        } 
+        // FIXME: should be a specialized Err
+        Ok(false)
+    }
 
-                if let AccessBase::White = access_base {
-                    return Ok(true);
-                } else if let AccessBase::Black = access_base {
-                    return Ok(false);
+    /// checks if the user has perms to the *children* of the entry
+    fn has_write_perm(&self, user_id: u64, entry_id: u64) -> Result<bool, DataError> {
+        let mut data_iter = self.get_entry_data_iter(entry_id)?;
+        let (mut header, mut entry_type) = HeaderData::from_data_iter(&mut data_iter)?;
+        let mut current_id = entry_id;
+        loop {
+            if entry_type == ACCESS_GROUP {
+                let EntryData::AccessGroup {
+                    name: _,
+                    write_perms,
+                    read_perms: _,
+                } = EntryData::from_data_iter(&mut data_iter, entry_type)? else {panic!("EntryData read as an AccessGroup should match an AccessGroup")};
+
+                if let Some(has_perm) = write_perms.contains(user_id) {
+                    return Ok(has_perm);
                 }
             }
             if current_id == ROOT_ID {
@@ -326,13 +345,13 @@ impl MessageBoard {
                 match request {
                     BoardRequest::GetEntry { user_id, entry_id} => {
                         let entry = board.get_entry(entry_id)?;
-                        if entry.header_data.author_id != user_id && !board.has_access_perm(user_id, entry.header_data.parent_id)? {
+                        if entry.header_data.author_id != user_id && !board.has_read_perm(user_id, entry.header_data.parent_id)? {
                             return Err(DataError::InsufficientPerms.into())
                         }
                         Ok(BoardResponse::GetEntry(entry))
                     }
                     BoardRequest::AddEntry { user_id , entry} => {
-                        if !board.has_access_perm(user_id, entry.header_data.parent_id)? {
+                        if !board.has_write_perm(user_id, entry.header_data.parent_id)? {
                             return Err(DataError::InsufficientPerms.into())
                         }
                         let entry_id = MessageBoard::generate_unique_id(rng, &board.entry_ids.read().unwrap());

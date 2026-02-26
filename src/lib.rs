@@ -62,6 +62,7 @@ pub enum DataError {
     NonChild,
 
     InternalError,
+    OOBUsizeConversion,
 }
 
 impl From<FromUtf8Error> for DataError {
@@ -94,6 +95,33 @@ fn read_u64(data_iter: &mut impl Iterator<Item = u8>) -> Result<u64, DataError> 
     Ok(u64::from_le_bytes(num))
 }
 
+/// current file version: 0
+/// 
+/// data format, numbers are little endian: 
+///     magic number (u16):         0x1234,   
+///     file version number (u8):   00,
+///     type (u8):                      
+///         Message:                00,   
+///         AccessGroup:            01,
+///     parent entry id (u64),
+///     number of children ids (u16),
+///     children id 1 (u64),
+///     ...
+///     children id n (u64),
+///     remaining is dependent on the type
+/// 
+/// Message:
+///     timestamp (secs since Unix Epoch) (u64),
+///     message size (u32),
+///     remaining [message size] bytes are the message which is a utf8 encoded string
+/// 
+/// AccessGroup:
+///     group name length (u32),
+///     group name string (utf8 encoded),
+///     write perms: DefaultedIdSet
+///     read perms: DefaultedIdSet
+/// 
+/// 
 #[derive(PartialEq, Eq, Debug)]
 pub struct Entry {
     pub header_data: HeaderData,
@@ -101,40 +129,6 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// current file version: 0
-    /// 
-    /// data format, numbers are little endian: 
-    ///     magic number (u16):         0x1234,   
-    ///     file version number (u8):   00,
-    ///     type (u8):                      
-    ///         Message:                00,   
-    ///         AccessGroup:            01,
-    ///     parent entry id (u64),
-    ///     number of children ids (u16),
-    ///     children id 1 (u64),
-    ///     ...
-    ///     children id n (u64),
-    ///     remaining is dependent on the type
-    /// 
-    /// Message:
-    ///     timestamp (secs since Unix Epoch) (u64),
-    ///     message size (u32),
-    ///     remaining [message size] bytes are the message which is a utf8 encoded string
-    /// 
-    /// AccessGroup:
-    ///     group name length (u32),
-    ///     group name string (utf8 encoded),
-    ///     overrides / doesn't preserve perms (bool, 1 byte),
-    ///     number of whitelist ids (u32),
-    ///     whitelist id 1 (u64),
-    ///     ...
-    ///     whitelist id n (u64),
-    ///     number of blacklist ids (u32),
-    ///     blacklist id 1 (u64),
-    ///     ...
-    ///     blacklist id n (u64),
-    /// 
-    /// 
     pub fn from_data(data: &[u8]) -> Result<Self, DataError> {
         let mut data_iter = data.iter().copied();
         Self::from_data_iter(&mut data_iter)
@@ -216,6 +210,128 @@ impl HeaderData {
 }
 
 #[derive(PartialEq, Eq, Debug)]
+pub enum DefaultBase {
+    Inherit,
+    White,
+    Black,
+}
+
+impl DefaultBase {
+    pub fn get_discriminant(&self) -> u8 {
+        match self {
+            Self::Inherit => INHERIT_BASE,
+            Self::White => WHITE_BASE,
+            Self::Black => BLACK_BASE,
+        }
+    }
+
+    pub fn from_discriminant(discriminant: u8) -> Result<Self, DataError> {
+        match discriminant {
+            INHERIT_BASE => Ok(Self::Inherit),
+            WHITE_BASE => Ok(Self::White),
+            BLACK_BASE => Ok(Self::Black),
+            _ => Err(DataError::InvalidDiscriminant)
+        }
+    }
+}
+
+impl std::fmt::Display for DefaultBase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", match self {
+            Self::Inherit => "Inherit",
+            Self::Black => "Black",
+            Self::White => "White",
+        })
+    }
+}
+
+#[derive(PartialEq, Eq, Debug)]
+pub enum DefaultedIdSet {
+    Inherit{whitelist_ids: Vec<u64>, blacklist_ids: Vec<u64>},
+    White{blacklist_ids: Vec<u64>},
+    Black{whitelist_ids: Vec<u64>},
+}
+
+impl DefaultedIdSet {
+    pub fn contains(&self, id: u64) -> Option<bool> {
+        match self {
+            Self::Inherit { whitelist_ids, blacklist_ids } => {
+                let whitelisted = whitelist_ids.contains(&id);
+                let blacklisted = blacklist_ids.contains(&id);
+                match (whitelisted, blacklisted) {
+                    (true, false) => Some(true),
+                    (false, true) => Some(false),
+                    _ => None
+                }
+            }
+            Self::White { blacklist_ids } => {
+                Some(!blacklist_ids.contains(&id))
+            }
+            Self::Black { whitelist_ids } => {
+                Some(whitelist_ids.contains(&id))
+            }
+        }
+    }
+
+    pub fn get_default_base(&self) -> DefaultBase {
+        match &self {
+            Self::Inherit { whitelist_ids: _, blacklist_ids: _ } => DefaultBase::Inherit,
+            Self::Black { whitelist_ids: _ } => DefaultBase::Black,
+            Self::White { blacklist_ids: _ } => DefaultBase::White,
+        }
+    }
+
+    pub fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> {
+        fn read_vec(data_iter: &mut impl Iterator<Item = u8>) -> Result<Vec<u64>, DataError> {
+            let len = read_u32(data_iter)? as usize;
+            let mut vec = Vec::with_capacity(len);
+            for _ in 0..len {
+                vec.push(read_u64(data_iter)?);
+            }
+            Ok(vec)
+        }
+
+        Ok(match DefaultBase::from_discriminant(data_iter.next().ok_or(DataError::InsufficientBytes)?)? {
+            DefaultBase::Inherit => {
+                let whitelist_ids = read_vec(data_iter)?;
+                let blacklist_ids = read_vec(data_iter)?;
+                Self::Inherit { whitelist_ids, blacklist_ids }
+            }
+            DefaultBase::White => {
+                let blacklist_ids = read_vec(data_iter)?;
+                Self::White { blacklist_ids }
+            }
+            DefaultBase::Black => {
+                let whitelist_ids = read_vec(data_iter)?;
+                Self::Black { whitelist_ids }
+            }
+        })
+    }
+
+    pub fn extend_data(&self, data: &mut Vec<u8>) {
+        fn write_vec(vec: &[u64], data: &mut Vec<u8>) {
+            assert!(vec.len() as u128 <= u32::MAX as u128, "Failed to write entry: too many ids in a DefaultedIdSet: {}", vec.len());
+            data.extend_from_slice(&(vec.len() as u32).to_le_bytes());
+            data.extend(vec.iter().flat_map(|x| x.to_le_bytes()));
+        }
+
+        data.push(self.get_default_base().get_discriminant());
+        match self {
+            Self::Inherit { whitelist_ids, blacklist_ids } => {
+                write_vec(&whitelist_ids, data);
+                write_vec(&blacklist_ids, data);
+            }
+            Self::White { blacklist_ids } => {
+                write_vec(&blacklist_ids, data);
+            }
+            Self::Black { whitelist_ids } => {
+                write_vec(&whitelist_ids, data);
+            }
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Debug)]
 pub enum EntryData {
     Message {
         timestamp: u64,
@@ -223,9 +339,8 @@ pub enum EntryData {
     },
     AccessGroup {
         name: String,
-        access_base: AccessBase,
-        whitelist_ids: Vec<u64>,
-        blacklist_ids: Vec<u64>,
+        write_perms: DefaultedIdSet,
+        read_perms: DefaultedIdSet,
     },
 }
 
@@ -233,7 +348,7 @@ impl EntryData {
     pub fn get_discriminant(&self) -> u8 {
         match self {
             Self::Message { timestamp: _, message: _ } => MESSAGE,
-            Self::AccessGroup { name: _, access_base: _, whitelist_ids: _, blacklist_ids: _ } => ACCESS_GROUP
+            Self::AccessGroup { name: _, read_perms: _, write_perms: _ } => ACCESS_GROUP,
         }
     }
 
@@ -253,29 +368,9 @@ impl EntryData {
             ACCESS_GROUP => { // AccessGroup
                 let name_len = read_u32(data_iter)? as usize;
                 let name = String::from_utf8((data_iter).take(name_len).collect::<Vec<_>>()).map_err(|e| DataError::StringError(e))?;
-                let access_base_discriminant = data_iter.next().ok_or(DataError::InsufficientBytes)?;
-                let access_base;
-                if access_base_discriminant == INHERIT_BASE {
-                    access_base = AccessBase::Inherit;
-                } else if access_base_discriminant == BLACK_BASE {
-                    access_base = AccessBase::Black;
-                } else if access_base_discriminant == WHITE_BASE {
-                    access_base = AccessBase::White;
-                } else {
-                    return Err(DataError::InvalidDiscriminant)
-                }
-
-                let num_whitelist_ids = read_u32(data_iter)?;
-                let mut whitelist_ids = Vec::with_capacity(num_whitelist_ids as usize);
-                for _ in 0..num_whitelist_ids {
-                    whitelist_ids.push(read_u64(data_iter)?);
-                }
-                let num_blacklist_ids = read_u32(data_iter)?;
-                let mut blacklist_ids = Vec::with_capacity(num_blacklist_ids as usize);
-                for _ in 0..num_blacklist_ids {
-                    blacklist_ids.push(read_u64(data_iter)?);
-                }
-                EntryData::AccessGroup { name, access_base, whitelist_ids, blacklist_ids }
+                let write_perms = DefaultedIdSet::from_data_iter(data_iter)?;
+                let read_perms = DefaultedIdSet::from_data_iter(data_iter)?;
+                EntryData::AccessGroup { name, write_perms, read_perms }
             }
             _ => {return Err(DataError::InvalidDiscriminant)}
         })
@@ -295,17 +390,12 @@ impl EntryData {
                 data.extend_from_slice(&(message.len() as u32).to_le_bytes());
                 data.extend_from_slice(message.as_bytes());
             }
-            Self::AccessGroup { name, access_base, whitelist_ids, blacklist_ids } => {
+            Self::AccessGroup { name, write_perms, read_perms } => {
                 assert!(name.len() <= u32::MAX as usize, "Failed to write entry: Name is too long: {}", name.len());
                 data.extend_from_slice(&(name.len() as u32).to_le_bytes());
                 data.extend_from_slice(name.as_bytes());
-                data.push(access_base.get_discriminant());
-                assert!(whitelist_ids.len() <= u32::MAX as usize, "Failed to write entry: too many whitelist ids: {}", whitelist_ids.len());
-                data.extend_from_slice(&(whitelist_ids.len() as u32).to_le_bytes());
-                data.extend(whitelist_ids.iter().flat_map(|x| x.to_le_bytes()));
-                assert!(blacklist_ids.len() <= u32::MAX as usize, "Failed to write entry: too many blacklist ids: {}", blacklist_ids.len());
-                data.extend_from_slice(&(blacklist_ids.len() as u32).to_le_bytes());
-                data.extend(blacklist_ids.iter().flat_map(|x| x.to_le_bytes()));
+                write_perms.extend_data(data);
+                read_perms.extend_data(data);
             }
         }
     }
@@ -322,23 +412,6 @@ impl EntryVariant {
         match self {
             Self::Message => "Message",
             Self::AccessGroup => "Access Group"
-        }
-    }
-}
-
-#[derive(PartialEq, Eq, Debug)]
-pub enum AccessBase {
-    Inherit,
-    White,
-    Black,
-}
-
-impl AccessBase {
-    pub fn get_discriminant(&self) -> u8 {
-        match self {
-            Self::Inherit => INHERIT_BASE,
-            Self::White => WHITE_BASE,
-            Self::Black => BLACK_BASE,
         }
     }
 }

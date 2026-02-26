@@ -23,7 +23,7 @@ const RC_FILE: &str = ".config/message_board/client_rc.toml";
 fn extract_name(entry_id: u64, entry: &Entry) -> String {
     #[allow(unreachable_patterns)]
     match &entry.entry_data {
-        EntryData::AccessGroup { name, access_base: _, whitelist_ids: _, blacklist_ids: _ } => name.clone(),
+        EntryData::AccessGroup { name, write_perms: _, read_perms: _ } => name.clone(),
         EntryData::Message { timestamp: _, message: _ } => format!("{:016X}", entry_id),
         _ => entry_id.to_string(),
     }
@@ -220,60 +220,62 @@ impl Widget for &EntryViewer {
                         Paragraph::new(message as &str).render(inner_area, buf);
 
                     }
-                    EntryData::AccessGroup { name, access_base, whitelist_ids, blacklist_ids } => {
-                        title.push_span(" Access Group (");
-                        title.push_span(match access_base {
-                            AccessBase::Inherit => "Inherit",
-                            AccessBase::Black => "Black",
-                            AccessBase::White => "White",
-                        });
-                        title.push_span(") ");
-                        match access_base {
-                            AccessBase::Inherit => {
-                                let layout = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).split(inner_area);
-                                let mut whitelist = Text::default();
-                                whitelist.push_line("Whitelisted:");
-                                for id in whitelist_ids {
-                                    let mut line = Line::default();
-                                    line.push_span(" -  ".bold());
-                                    line.push_span(id.to_string());
-                                    whitelist.push_line(line);
+                    EntryData::AccessGroup { name, write_perms, read_perms } => {
+                        title.push_span(" Access Group ");
+                        let mut write_read_titles = [String::from(" Write (Base: "), String::from(" Read (Base: ")];
+                        let mut write_read_layout = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).split(inner_area);
+                        for ((perm_set, perm_name ), area) in [write_perms, read_perms].iter().copied().zip(&mut write_read_titles).zip(write_read_layout.iter().copied()) {
+                            let block = Block::bordered();
+                            let perm_set_area = block.inner(area);
+                            perm_name.push_str(&perm_set.get_default_base().to_string());
+                            perm_name.push_str(") ");
+                            match perm_set {
+                                DefaultedIdSet::Inherit { whitelist_ids, blacklist_ids } => {
+                                    let layout = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).split(perm_set_area);
+                                    let mut whitelist = Text::default();
+                                    whitelist.push_line("Whitelisted:");
+                                    for id in whitelist_ids {
+                                        let mut line = Line::default();
+                                        line.push_span(" -  ".bold());
+                                        line.push_span(id.to_string());
+                                        whitelist.push_line(line);
+                                    }
+                                    let mut blacklist = Text::default();
+                                    blacklist.push_line("Blacklisted:");
+                                    for id in blacklist_ids {
+                                        let mut line = Line::default();
+                                        line.push_span(" -  ".bold());
+                                        line.push_span(id.to_string());
+                                        blacklist.push_line(line);
+                                    }
+                                    whitelist.render(layout[0], buf);
+                                    blacklist.render(layout[1], buf);
                                 }
-                                let mut blacklist = Text::default();
-                                blacklist.push_line("Blacklisted:");
-                                for id in blacklist_ids {
-                                    let mut line = Line::default();
-                                    line.push_span(" -  ".bold());
-                                    line.push_span(id.to_string());
-                                    blacklist.push_line(line);
+                                DefaultedIdSet::White { blacklist_ids } => {
+                                    let mut blacklist = Text::default();
+                                    blacklist.push_line("Blacklisted:");
+                                    for id in blacklist_ids {
+                                        let mut line = Line::default();
+                                        line.push_span(" -  ".bold());
+                                        line.push_span(id.to_string());
+                                        blacklist.push_line(line);
+                                    }
+                                    blacklist.render(perm_set_area, buf);
                                 }
-                                whitelist.render(layout[0], buf);
-                                blacklist.render(layout[1], buf);
-                            }
-                            AccessBase::Black => {
-                                let mut blacklist = Text::default();
-                                blacklist.push_line("Blacklisted:");
-                                for id in blacklist_ids {
-                                    let mut line = Line::default();
-                                    line.push_span(" -  ".bold());
-                                    line.push_span(id.to_string());
-                                    blacklist.push_line(line);
+                                DefaultedIdSet::Black { whitelist_ids } => {
+                                    let mut whitelist = Text::default();
+                                    whitelist.push_line("Whitelisted:");
+                                    for id in whitelist_ids {
+                                        let mut line = Line::default();
+                                        line.push_span(" -  ".bold());
+                                        line.push_span(id.to_string());
+                                        whitelist.push_line(line);
+                                    }
+                                    whitelist.render(perm_set_area, buf);
                                 }
-                                blacklist.render(inner_area, buf);
-                            }
-                            AccessBase::White => {
-                                let mut whitelist = Text::default();
-                                whitelist.push_line("Whitelisted:");
-                                for id in whitelist_ids {
-                                    let mut line = Line::default();
-                                    line.push_span(" -  ".bold());
-                                    line.push_span(id.to_string());
-                                    whitelist.push_line(line);
-                                }
-                                whitelist.render(inner_area, buf);
                             }
                         }
-                    }
+                        }
                 }
             }
             None => {
@@ -651,6 +653,7 @@ impl Widget for &Client {
                             DataError::NonChild => "NonChild ",
 
                             DataError::InternalError => "InternalError",
+                            DataError::OOBUsizeConversion => "OOBUsizeConversion",
                         });
                         text.push_line(line);
                     }
