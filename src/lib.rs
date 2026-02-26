@@ -108,6 +108,7 @@ fn read_u64(data_iter: &mut impl Iterator<Item = u8>) -> Result<u64, DataError> 
 ///     children id 1 (u64),
 ///     ...
 ///     children id n (u64),
+///     author id (u64),
 ///     remaining is dependent on the type
 /// 
 /// Message:
@@ -245,6 +246,24 @@ impl std::fmt::Display for DefaultBase {
     }
 }
 
+/// data format:
+/// 
+/// DefaultBase discriminant (u8)
+/// Rest depends on the DefaultBase
+/// 
+/// Inherit:
+///     number of whitelist_ids (u32)
+///     whitelisted id 1 - n (u64 each)
+///     number of blacklist_ids (u32)
+///     blacklisted id 1 - n (u64 each)
+/// 
+/// Black:
+///     number of whitelist_ids (u32)
+///     whitelisted id 1 - n (u64 each)
+/// 
+/// White:
+///     number of blacklist_ids (u32)
+///     blacklisted id 1 - n (u64 each)
 #[derive(PartialEq, Eq, Debug)]
 pub enum DefaultedIdSet {
     Inherit{whitelist_ids: Vec<u64>, blacklist_ids: Vec<u64>},

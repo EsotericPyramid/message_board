@@ -221,10 +221,12 @@ impl Widget for &EntryViewer {
 
                     }
                     EntryData::AccessGroup { name, write_perms, read_perms } => {
-                        title.push_span(" Access Group ");
-                        let mut write_read_titles = [String::from(" Write (Base: "), String::from(" Read (Base: ")];
-                        let mut write_read_layout = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).split(inner_area);
-                        for ((perm_set, perm_name ), area) in [write_perms, read_perms].iter().copied().zip(&mut write_read_titles).zip(write_read_layout.iter().copied()) {
+                        title.push_span(" Access Group - ");
+                        title.push_span(name);
+                        title.push_span(" ");
+                        let write_read_titles = [String::from(" Write (Base: "), String::from(" Read (Base: ")];
+                        let write_read_layout = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).split(inner_area);
+                        for ((perm_set, mut perm_name ), area) in [write_perms, read_perms].iter().copied().zip(write_read_titles).zip(write_read_layout.iter().copied()) {
                             let block = Block::bordered();
                             let perm_set_area = block.inner(area);
                             perm_name.push_str(&perm_set.get_default_base().to_string());
@@ -274,8 +276,9 @@ impl Widget for &EntryViewer {
                                     whitelist.render(perm_set_area, buf);
                                 }
                             }
+                            block.title(perm_name).render(area, buf);
                         }
-                        }
+                    }
                 }
             }
             None => {

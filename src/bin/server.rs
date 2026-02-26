@@ -295,7 +295,7 @@ impl MessageBoard {
                 break;
             }
             current_id = header.parent_id;
-            let mut data_iter = self.get_entry_data_iter(header.parent_id)?;
+            data_iter = self.get_entry_data_iter(header.parent_id)?;
             (header, entry_type) = HeaderData::from_data_iter(&mut data_iter)?;
         } 
         // FIXME: should be a specialized Err
@@ -323,7 +323,7 @@ impl MessageBoard {
                 break;
             }
             current_id = header.parent_id;
-            let mut data_iter = self.get_entry_data_iter(header.parent_id)?;
+            data_iter = self.get_entry_data_iter(header.parent_id)?;
             (header, entry_type) = HeaderData::from_data_iter(&mut data_iter)?;
         } 
         // FIXME: should be a specialized Err
