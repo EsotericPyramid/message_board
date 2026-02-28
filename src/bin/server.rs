@@ -168,17 +168,17 @@ impl MessageBoard {
     }
 
     fn write_new<P: AsRef<Path>>(path: P, contents: &[u8]) -> Result<(), DataError> {
-        fs::File::create_new(path).map_err(|_| DataError::AlreadyExists)?.write_all(contents).map_err(|_| DataError::InternalError)?;
+        fs::File::create_new(path).map_err(|_| DataError::AlreadyExists)?.write_all(contents).map_err(|_| internal_error!())?;
         Ok(())
     }
 
     fn overwrite_old<P: AsRef<Path>>(path: P, contents: &[u8]) -> Result<(), DataError> {
-        fs::File::options().write(true).truncate(true).open(&path).map_err(|_| DataError::DoesNotExist)?.write_all(contents).map_err(|_| DataError::InternalError)?;
+        fs::File::options().write(true).truncate(true).open(&path).map_err(|_| DataError::DoesNotExist)?.write_all(contents).map_err(|_| internal_error!())?;
         Ok(())
     }
 
     fn append_old<P: AsRef<Path>>(path: P, contents: &[u8]) -> Result<(), DataError> {
-        fs::File::options().write(true).append(true).open(&path).map_err(|_| DataError::DoesNotExist)?.write_all(contents).map_err(|_| DataError::InternalError)?;
+        fs::File::options().write(true).append(true).open(&path).map_err(|_| DataError::DoesNotExist)?.write_all(contents).map_err(|_| internal_error!())?;
         Ok(())
     }
 
@@ -239,7 +239,7 @@ impl MessageBoard {
     fn update_user_ids(&self) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push("users");
-        let new = fs::read_dir(&path).map_err(|_| DataError::InternalError)?.map(|user_file| {
+        let new = fs::read_dir(&path).map_err(|_| internal_error!())?.map(|user_file| {
             u64::from_str_radix(user_file.unwrap().file_name().to_str().unwrap(), 16).unwrap()
         }).collect();
         {
@@ -251,7 +251,7 @@ impl MessageBoard {
     fn update_entry_ids(&self) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push("entries");
-        *self.entry_ids.write().unwrap() = fs::read_dir(&path).map_err(|_| DataError::InternalError)?.map(|entry_file| {
+        *self.entry_ids.write().unwrap() = fs::read_dir(&path).map_err(|_| internal_error!())?.map(|entry_file| {
             u64::from_str_radix(entry_file.unwrap().file_name().to_str().unwrap(), 16).unwrap()
         }).collect();
         Ok(())
@@ -530,7 +530,7 @@ impl Server {
 
                 for (id, message) in outgoing_queue_rx.try_iter() {
                     let Some(client) = clients_write.get_mut(&id) else {unresolved_messages.push((id, message)); continue;};
-                    let message = BoardResponse::into_data(&message).unwrap_or_else(|_| {println!("Failed to encode server response"); BoardResponse::into_data(&Err(DataError::InternalError)).unwrap()});
+                    let message = BoardResponse::into_data(&message).unwrap_or_else(|_| {println!("Failed to encode server response"); BoardResponse::into_data(&Err(internal_error!())).unwrap()});
                     println!("Sending {} byte message", message.len());
                     let _ = client.write_all(&(message.len() as u64).to_le_bytes());
                     let _ = client.write_all(&message); // should push to unresolved_messages
@@ -551,7 +551,7 @@ impl Server {
                     drop(global_id_map); // getting rid of the guard
                     for (id, message) in unresolved_messages.drain(..) {
                         let Some(client) = clients_write.get_mut(&id) else {eprintln!("client for id not found, dropping unresolved message"); continue;};
-                        let message = BoardResponse::into_data(&message).unwrap_or_else(|_| {println!("Failed to encode server response"); BoardResponse::into_data(&Err(DataError::InternalError)).unwrap()});
+                        let message = BoardResponse::into_data(&message).unwrap_or_else(|_| {println!("Failed to encode server response"); BoardResponse::into_data(&Err(internal_error!())).unwrap()});
                         println!("Sending {} byte message", message.len());
                         let _ = client.write_all(&(message.len() as u64).to_le_bytes());
                         let _ = client.write_all(&message); // should push to unresolved_messages

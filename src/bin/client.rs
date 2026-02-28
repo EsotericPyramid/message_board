@@ -12,6 +12,7 @@ use ratatui::{
     buffer::Buffer,
 };
 use message_board::utils::*;
+use message_board::internal_error;
 
 const ENTRY_VARIANTS: [EntryVariant; 2] = [
     EntryVariant::Message,
@@ -420,14 +421,14 @@ impl Client {
     fn get_entry(&mut self, entry_id: u64) -> Result<Entry, DataError> {
         let request = BoardRequest::GetEntry { user_id: self.user_id.unwrap(), entry_id };
         let response = self.send_request(request)?;
-        let BoardResponse::GetEntry(entry) = response else {return Err(DataError::InternalError)};
+        let BoardResponse::GetEntry(entry) = response else {return Err(internal_error!())};
         Ok(entry)
     }
 
     fn write_entry(&mut self, entry: Entry) -> Result<u64, DataError> {
         let request = BoardRequest::AddEntry { user_id: self.user_id.unwrap(), entry: entry };
         let response = self.send_request(request)?;
-        let BoardResponse::AddEntry(entry_id) = response else {return Err(DataError::InternalError)};
+        let BoardResponse::AddEntry(entry_id) = response else {return Err(internal_error!())};
         Ok(entry_id)
     }
 
@@ -439,7 +440,7 @@ impl Client {
     fn get_user(&mut self, user_id: u64) -> Result<UserData, DataError> {
         let request = BoardRequest::GetUser { user_id };
         let response = self.send_request(request)?;
-        let BoardResponse::GetUser(user) = response else {return Err(DataError::InternalError)};
+        let BoardResponse::GetUser(user) = response else {return Err(internal_error!())};
         Ok(user)
     }
 
@@ -447,7 +448,7 @@ impl Client {
         if let Some(_) = self.user_id {return Ok(false)}
         let request = BoardRequest::AddUser;
         let response = self.send_request(request)?;
-        let BoardResponse::AddUser(user_id) = response else {return Err(DataError::InternalError)};
+        let BoardResponse::AddUser(user_id) = response else {return Err(internal_error!())};
         self.user_id = Some(user_id);
         self.edit_config(|config| config["user_id"] = toml::Value::Integer(user_id as i64));
         Ok(true)
@@ -640,24 +641,7 @@ impl Widget for &Client {
 
                     let mut text = Text::default();
                     for error in errors {
-                        let line = Line::from(match error {
-                            DataError::IncorrectMagicNum => "IncorrectMagicNum",
-                            DataError::InsufficientBytes => "InsufficientBytes",
-                            DataError::InvalidDiscriminant => "InvalidDiscriminant",
-                            DataError::StringError(_) => "StringError",
-                            DataError::UnsupportedVersion => "UnsupportedVersion",     
-
-                            DataError::DoesNotExist => "DoesNotExist",
-                            DataError::AlreadyExists => "AlreadyExists",
-                            DataError::InsufficientPerms => "InsufficientPerms",
-                            DataError::BadCredentials => "BadCredentials",
-
-                            DataError::MalformedRoot => "MalformedRoot",
-                            DataError::NonChild => "NonChild ",
-
-                            DataError::InternalError => "InternalError",
-                            DataError::OOBUsizeConversion => "OOBUsizeConversion",
-                        });
+                        let line = Line::from(format!("{:?}", error));
                         text.push_line(line);
                     }
 

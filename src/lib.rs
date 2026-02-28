@@ -61,8 +61,15 @@ pub enum DataError {
     MalformedRoot,
     NonChild,
 
-    InternalError,
+    InternalError{file: &'static str, line: u32, col: u32},
     OOBUsizeConversion,
+}
+
+#[macro_export]
+macro_rules! internal_error {
+    () => {
+        DataError::InternalError{file: file!(), line: line!(), col: column!()}
+    };
 }
 
 impl From<FromUtf8Error> for DataError {
@@ -654,7 +661,7 @@ impl BoardResponse {
             }
             ERROR => {
                 
-                return Err(DataError::InternalError);
+                return Err(internal_error!());
             }
             _ => {return Err(DataError::InvalidDiscriminant)}
         })
