@@ -406,7 +406,7 @@ impl Client {
     }
 
     fn send_request(&mut self, request: BoardRequest) -> Result<BoardResponse, DataError> {
-        let request = request.into_data();
+        let request = request.into_data()?;
         let _ = self.stream.write_all(&(request.len() as u64).to_le_bytes());
         let _ = self.stream.write_all(&request);
         let mut num_bytes = [0; 8];

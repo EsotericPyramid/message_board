@@ -135,7 +135,7 @@ fn entry_data_conversion() {
     let mut char_rng = get_char_rng(rng.clone());
     for _ in 0..RANDOM_TEST_RETRIES {
         let entry = rand_entry(&mut rng, &mut char_rng);
-        assert_eq!(entry, Entry::from_data(&entry.into_data()).unwrap(), "Invalid Entry Conversion");
+        assert_eq!(entry, Entry::from_data(&entry.into_data().unwrap()).unwrap(), "Invalid Entry Conversion");
     }
 }
 
@@ -145,7 +145,7 @@ fn user_data_conversion() {
     let mut char_rng = get_char_rng(rng.clone());
     for _ in 0..RANDOM_TEST_RETRIES {
         let user = rand_user(&mut rng, &mut char_rng);
-        assert_eq!(user, UserData::from_data(&user.into_data()).unwrap(), "Invalid User Conversion");
+        assert_eq!(user, UserData::from_data(&user.into_data().unwrap()).unwrap(), "Invalid User Conversion");
     }
 }
 
@@ -155,7 +155,7 @@ fn request_data_conversion() {
     let mut char_rng = get_char_rng(rng.clone());
     for _ in 0..RANDOM_TEST_RETRIES {
         let request = rand_request(&mut rng, &mut char_rng);
-        assert_eq!(request, BoardRequest::from_data(&request.into_data()).unwrap(), "Invalid Request Conversion");
+        assert_eq!(request, BoardRequest::from_data(&request.into_data().unwrap()).unwrap(), "Invalid Request Conversion");
     }
 }
 
@@ -165,6 +165,6 @@ fn response_data_conversion() {
     let mut char_rng = get_char_rng(rng.clone());
     for _ in 0..RANDOM_TEST_RETRIES {
         let response = rand_response(&mut rng, &mut char_rng);
-        assert_eq!(response, BoardResponse::from_data(&BoardResponse::into_data(&response)), "Invalid Request Conversion");
+        assert_eq!(response, BoardResponse::from_data(&BoardResponse::into_data(&response).unwrap()), "Invalid Request Conversion");
     }
 }

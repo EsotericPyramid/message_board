@@ -71,10 +71,14 @@ impl From<FromUtf8Error> for DataError {
     }
 }
 
+fn read_u8(data_iter: &mut impl Iterator<Item = u8>) -> Result<u8, DataError> {
+    data_iter.next().ok_or(DataError::InsufficientBytes)
+}
+
 fn read_u16(data_iter: &mut impl Iterator<Item = u8>) -> Result<u16, DataError> {
     let mut num = [0; 2];
     for i in 0..2 {
-        num[i] = data_iter.next().ok_or(DataError::InsufficientBytes)?;
+        num[i] = read_u8(data_iter)?;
     }
     Ok(u16::from_le_bytes(num))
 }
@@ -82,7 +86,7 @@ fn read_u16(data_iter: &mut impl Iterator<Item = u8>) -> Result<u16, DataError> 
 fn read_u32(data_iter: &mut impl Iterator<Item = u8>) -> Result<u32, DataError> {
     let mut num = [0; 4];
     for i in 0..4 {
-        num[i] = data_iter.next().ok_or(DataError::InsufficientBytes)?;
+        num[i] = read_u8(data_iter)?;
     }
     Ok(u32::from_le_bytes(num))
 }
@@ -90,9 +94,21 @@ fn read_u32(data_iter: &mut impl Iterator<Item = u8>) -> Result<u32, DataError> 
 fn read_u64(data_iter: &mut impl Iterator<Item = u8>) -> Result<u64, DataError> {
     let mut num = [0; 8];
     for i in 0..8 {
-        num[i] = data_iter.next().ok_or(DataError::InsufficientBytes)?;
+        num[i] = read_u8(data_iter)?;
     }
     Ok(u64::from_le_bytes(num))
+}
+
+macro_rules! bounded_usize {
+    ($expr:expr, $num:ty) => {
+        {
+            let val: usize = $expr;
+            match (val as $num) as usize == val {
+                true => Ok(()),
+                false => Err(DataError::OOBUsizeConversion)
+            }
+        }
+    };
 }
 
 /// current file version: 0
@@ -144,15 +160,16 @@ impl Entry {
         })
     }
 
-    pub fn into_data(&self) -> Vec<u8> {
+    pub fn into_data(&self) -> Result<Vec<u8>, DataError> {
         let mut data = Vec::new();
-        self.extend_data(&mut data);
-        data
+        self.extend_data(&mut data)?;
+        Ok(data)
     }
 
-    pub fn extend_data(&self, data: &mut Vec<u8>) {
-        self.header_data.extend_data(self.entry_data.get_discriminant(), data);
-        self.entry_data.extend_data(data);
+    pub fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
+        self.header_data.extend_data(self.entry_data.get_discriminant(), data)?;
+        self.entry_data.extend_data(data)?;
+        Ok(())
     }
 }
 
@@ -176,10 +193,10 @@ impl HeaderData {
         let magic_number = read_u16(data_iter)?;
         if magic_number != ENTRY_MAGIC_NUMBER {return Err(DataError::IncorrectMagicNum)}
 
-        let version = data_iter.next().ok_or(DataError::InsufficientBytes)?;
+        let version = read_u8(data_iter)?;
         if version != 0 {return Err(DataError::UnsupportedVersion)}
 
-        let entry_type = data_iter.next().ok_or(DataError::InsufficientBytes)?;
+        let entry_type = read_u8(data_iter)?;
 
         let parent_id = read_u64(data_iter)?;
         let num_children = read_u16(data_iter)?;
@@ -192,21 +209,22 @@ impl HeaderData {
         Ok((HeaderData { version, parent_id, children_ids, author_id }, entry_type))
     }
 
-    pub fn into_data(&self, entry_type: u8) -> Vec<u8> {
+    pub fn into_data(&self, entry_type: u8) -> Result<Vec<u8>, DataError> {
         let mut data = Vec::new();
-        self.extend_data(entry_type, &mut data);
-        data
+        self.extend_data(entry_type, &mut data)?;
+        Ok(data)
     }
 
-    pub fn extend_data(&self, entry_type: u8, data: &mut Vec<u8>) {
+    pub fn extend_data(&self, entry_type: u8, data: &mut Vec<u8>) -> Result<(), DataError> {
         data.extend_from_slice(&ENTRY_MAGIC_NUMBER.to_le_bytes());
         data.push(ENTRY_FILE_VERSION);
         data.push(entry_type);
         data.extend_from_slice(&self.parent_id.to_le_bytes());
-        assert!(self.children_ids.len() <= u16::MAX as usize, "Failed to write entry: Too many children {}", self.children_ids.len());
+        bounded_usize!(self.children_ids.len(), u16)?;
         data.extend_from_slice(&(self.children_ids.len() as u16).to_le_bytes());
         data.extend(self.children_ids.iter().flat_map(|x| x.to_le_bytes()));
         data.extend_from_slice(&self.author_id.to_le_bytes());
+        Ok(())
     }
 }
 
@@ -310,7 +328,7 @@ impl DefaultedIdSet {
             Ok(vec)
         }
 
-        Ok(match DefaultBase::from_discriminant(data_iter.next().ok_or(DataError::InsufficientBytes)?)? {
+        Ok(match DefaultBase::from_discriminant(read_u8(data_iter)?)? {
             DefaultBase::Inherit => {
                 let whitelist_ids = read_vec(data_iter)?;
                 let blacklist_ids = read_vec(data_iter)?;
@@ -327,26 +345,28 @@ impl DefaultedIdSet {
         })
     }
 
-    pub fn extend_data(&self, data: &mut Vec<u8>) {
-        fn write_vec(vec: &[u64], data: &mut Vec<u8>) {
-            assert!(vec.len() as u128 <= u32::MAX as u128, "Failed to write entry: too many ids in a DefaultedIdSet: {}", vec.len());
+    pub fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
+        fn write_vec(vec: &[u64], data: &mut Vec<u8>) -> Result<(), DataError> {
+            bounded_usize!(vec.len(), u32)?;
             data.extend_from_slice(&(vec.len() as u32).to_le_bytes());
             data.extend(vec.iter().flat_map(|x| x.to_le_bytes()));
+            Ok(())
         }
 
         data.push(self.get_default_base().get_discriminant());
         match self {
             Self::Inherit { whitelist_ids, blacklist_ids } => {
-                write_vec(&whitelist_ids, data);
-                write_vec(&blacklist_ids, data);
+                write_vec(&whitelist_ids, data)?;
+                write_vec(&blacklist_ids, data)?;
             }
             Self::White { blacklist_ids } => {
-                write_vec(&blacklist_ids, data);
+                write_vec(&blacklist_ids, data)?;
             }
             Self::Black { whitelist_ids } => {
-                write_vec(&whitelist_ids, data);
+                write_vec(&whitelist_ids, data)?;
             }
         }
+        Ok(())
     }
 }
 
@@ -395,28 +415,29 @@ impl EntryData {
         })
     }
 
-    pub fn into_data(&self) -> Vec<u8> {
+    pub fn into_data(&self) -> Result<Vec<u8>, DataError> {
         let mut data = Vec::new();
-        self.extend_data(&mut data);
-        data
+        self.extend_data(&mut data)?;
+        Ok(data)
     }
 
-    pub fn extend_data(&self, data: &mut Vec<u8>) {
+    pub fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
         match self {
             Self::Message { timestamp, message } => {
                 data.extend_from_slice(&timestamp.to_le_bytes());
-                assert!(message.len() <= u32::MAX as usize, "Failed to write entry: Message is too long: {}", message.len());
+                bounded_usize!(message.len(), u32)?;
                 data.extend_from_slice(&(message.len() as u32).to_le_bytes());
                 data.extend_from_slice(message.as_bytes());
             }
             Self::AccessGroup { name, write_perms, read_perms } => {
-                assert!(name.len() <= u32::MAX as usize, "Failed to write entry: Name is too long: {}", name.len());
+                bounded_usize!(name.len(), u32)?;
                 data.extend_from_slice(&(name.len() as u32).to_le_bytes());
                 data.extend_from_slice(name.as_bytes());
-                write_perms.extend_data(data);
-                read_perms.extend_data(data);
+                write_perms.extend_data(data)?;
+                read_perms.extend_data(data)?;
             }
         }
+        Ok(())
     }
 }
 
@@ -442,7 +463,9 @@ pub struct UserData {
 
 impl UserData {
     pub fn new_empty() -> Self {
-        UserData { entry_ids: Vec::new() }
+        UserData { 
+            entry_ids: Vec::new() 
+        }
     }
 
     pub fn from_data(data: &[u8]) -> Result<Self, DataError> {
@@ -461,7 +484,7 @@ impl UserData {
     pub fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> {
         let magic_number = read_u16(data_iter)?;
         if magic_number != USER_MAGIC_NUMBER {return Err(DataError::IncorrectMagicNum)};
-        let version = data_iter.next().ok_or(DataError::InsufficientBytes)?;
+        let version = read_u8(data_iter)?;
         if version != 0 {return Err(DataError::UnsupportedVersion)};
         let num_entries = read_u32(data_iter)? as usize;
         let mut entry_ids = Vec::with_capacity(num_entries);
@@ -473,18 +496,19 @@ impl UserData {
         })
     }
 
-    pub fn into_data(&self) -> Vec<u8> {
+    pub fn into_data(&self) -> Result<Vec<u8>, DataError> {
         let mut data = Vec::new();
-        self.extend_data(&mut data);
-        data
+        self.extend_data(&mut data)?;
+        Ok(data)
     }
 
-    pub fn extend_data(&self, data: &mut Vec<u8>) {
+    pub fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
         data.extend_from_slice(&USER_MAGIC_NUMBER.to_le_bytes());
         data.push(USER_FILE_VERSION);
-        assert!(self.entry_ids.len() <= u32::MAX as usize, "Failed to write user: Too many entries: {}", self.entry_ids.len());
+        bounded_usize!(self.entry_ids.len(), u32)?;
         data.extend_from_slice(&(self.entry_ids.len() as u32).to_le_bytes());
         data.extend(self.entry_ids.iter().flat_map(|x| x.to_le_bytes()));
+        Ok(())
     }
 }
 
@@ -517,9 +541,9 @@ pub enum BoardRequest {
 impl BoardRequest {
     pub fn from_data(data: &[u8]) -> Result<Self, DataError> {
         let data_iter = &mut data.iter().copied();
-        let version = data_iter.next().ok_or(DataError::InsufficientBytes)?;
+        let version = read_u8(data_iter)?;
         if version != 0x00 {return Err(DataError::UnsupportedVersion)};
-        let discriminant = data_iter.next().ok_or(DataError::InsufficientBytes)?;
+        let discriminant = read_u8(data_iter)?;
         Ok(match discriminant {
             // entry requests
             GET_ENTRY => { // GetEntry
@@ -545,13 +569,13 @@ impl BoardRequest {
         })
     }
 
-    pub fn into_data(&self) -> Vec<u8> {
+    pub fn into_data(&self) -> Result<Vec<u8>, DataError> {
         let mut data = Vec::new();
-        self.extend_data(&mut data);
-        data
+        self.extend_data(&mut data)?;
+        Ok(data)
     }
 
-    pub fn extend_data(&self, data: &mut Vec<u8>) {
+    pub fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
         data.push(REQUEST_FORMAT_VERSION); //version
         match self {
             BoardRequest::GetEntry { user_id, entry_id } => {
@@ -562,7 +586,7 @@ impl BoardRequest {
             BoardRequest::AddEntry { user_id, entry } => {
                 data.push(ADD_ENTRY);
                 data.extend_from_slice(&user_id.to_le_bytes());
-                entry.extend_data(data);
+                entry.extend_data(data)?;
             },
             BoardRequest::GetUser { user_id } => {
                 data.push(GET_USER);
@@ -572,6 +596,7 @@ impl BoardRequest {
                 data.push(ADD_USER);
             },
         };
+        Ok(())
     }
 }
 
@@ -606,9 +631,9 @@ pub type MaybeBoardResponse = Result<BoardResponse, DataError>;
 impl BoardResponse {
     pub fn from_data(data: &[u8]) -> Result<Self, DataError> {
         let mut data_iter = data.iter().copied();
-        let version = data_iter.next().ok_or(DataError::InsufficientBytes)?;
+        let version = read_u8(&mut data_iter)?;
         if version != 0 {return Err(DataError::UnsupportedVersion)}
-        Ok(match data_iter.next().ok_or(DataError::InsufficientBytes)? {
+        Ok(match read_u8(&mut data_iter)? {
             // entry requests
             GET_ENTRY => { // GetEntry
                 let entry = Entry::from_data_iter(&mut data_iter)?;
@@ -636,18 +661,18 @@ impl BoardResponse {
 
     }
 
-    pub fn into_data(val: &MaybeBoardResponse) -> Vec<u8> {
+    pub fn into_data(val: &MaybeBoardResponse) -> Result<Vec<u8>, DataError> {
         let mut out = Vec::new();
-        Self::extend_data(val, &mut out);
-        out
+        Self::extend_data(val, &mut out)?;
+        Ok(out)
     }
 
-    pub fn extend_data(val: &MaybeBoardResponse, data: &mut Vec<u8>) {
+    pub fn extend_data(val: &MaybeBoardResponse, data: &mut Vec<u8>) -> Result<(), DataError> {
         data.push(RESPONSE_FORMAT_VERSION);
         match val {
             Ok(BoardResponse::GetEntry(entry)) => {
                 data.push(GET_ENTRY);
-                entry.extend_data(data);
+                entry.extend_data(data)?;
             }
             Ok(BoardResponse::AddEntry(entry_id)) => {
                 data.push(ADD_ENTRY);
@@ -655,7 +680,7 @@ impl BoardResponse {
             }
             Ok(BoardResponse::GetUser(user)) => {
                 data.push(GET_USER);
-                user.extend_data(data);
+                user.extend_data(data)?;
             }
             Ok(BoardResponse::AddUser(user_id)) => {
                 data.push(ADD_USER);
@@ -666,5 +691,6 @@ impl BoardResponse {
                 data.push(ERROR);
             }
         }
+        Ok(())
     }
 }

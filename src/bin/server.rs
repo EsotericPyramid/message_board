@@ -214,7 +214,7 @@ impl MessageBoard {
     fn write_entry(&self, entry_id: u64, entry: Entry) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push(format!("entries/{:016X}", entry_id));
-        Self::write_new(path, &entry.into_data())
+        Self::write_new(path, &entry.into_data()?)
     }
 
     /// encapsulation method to overwrite / edit an `Entry` at `entry_id`
@@ -223,7 +223,7 @@ impl MessageBoard {
     fn overwrite_entry(&self, entry_id: u64, new_entry: Entry) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push(format!("entries/{:016X}", entry_id));
-        Self::overwrite_old(path, &new_entry.into_data())
+        Self::overwrite_old(path, &new_entry.into_data()?)
     }
 
     /// encapsulation method to overwrite an updated `UserData` for `user_id`
@@ -232,7 +232,7 @@ impl MessageBoard {
     fn overwrite_user_data(&self, user_id: u64, new_data: UserData) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push(format!("users/{:016X}", user_id));
-        Self::overwrite_old(path, &new_data.into_data()) //FIXME: completely overwrites, even for small edits
+        Self::overwrite_old(path, &new_data.into_data()?) //FIXME: completely overwrites, even for small edits
     }
 
 
@@ -333,7 +333,7 @@ impl MessageBoard {
     fn add_user(&self, new_user_id: u64) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push(format!("users/{:016X}", new_user_id));
-        Self::write_new(&path, &UserData::new_empty().into_data());
+        Self::write_new(&path, &UserData::new_empty().into_data()?);
         Ok(())
     }
 
@@ -530,7 +530,7 @@ impl Server {
 
                 for (id, message) in outgoing_queue_rx.try_iter() {
                     let Some(client) = clients_write.get_mut(&id) else {unresolved_messages.push((id, message)); continue;};
-                    let message = BoardResponse::into_data(&message);
+                    let message = BoardResponse::into_data(&message).unwrap_or_else(|_| {println!("Failed to encode server response"); BoardResponse::into_data(&Err(DataError::InternalError)).unwrap()});
                     println!("Sending {} byte message", message.len());
                     let _ = client.write_all(&(message.len() as u64).to_le_bytes());
                     let _ = client.write_all(&message); // should push to unresolved_messages
@@ -551,7 +551,10 @@ impl Server {
                     drop(global_id_map); // getting rid of the guard
                     for (id, message) in unresolved_messages.drain(..) {
                         let Some(client) = clients_write.get_mut(&id) else {eprintln!("client for id not found, dropping unresolved message"); continue;};
-                        let _ = client.write_all(&BoardResponse::into_data(&message)); // should push to unresolved_messages
+                        let message = BoardResponse::into_data(&message).unwrap_or_else(|_| {println!("Failed to encode server response"); BoardResponse::into_data(&Err(DataError::InternalError)).unwrap()});
+                        println!("Sending {} byte message", message.len());
+                        let _ = client.write_all(&(message.len() as u64).to_le_bytes());
+                        let _ = client.write_all(&message); // should push to unresolved_messages
                     }
                 }
             }
