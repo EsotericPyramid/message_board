@@ -2,7 +2,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use message_board::*;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Stylize};
-use ratatui::widgets::Clear;
+use ratatui::widgets::{Clear, BorderType};
 use std::io::{Read, Write};
 use std::net::*;
 use ratatui::{
@@ -181,18 +181,93 @@ impl Widget for &Selector<EntryVariant> {
     }
 }
 
+struct TextEntry {
+    text: Vec<char>,
+    cursor_pos: usize,
+    max_size: usize,
+}
+
+impl TextEntry {
+    fn new(size: usize) -> Self {
+        Self { text: Vec::new(), cursor_pos: 0, max_size: size }
+    }
+
+    fn handle_input(&mut self, key_event: KeyEvent) -> bool {
+        match key_event.code {
+            KeyCode::Backspace => {
+                if self.cursor_pos > 0 {self.cursor_pos -= 1; self.text.remove(self.cursor_pos);}
+            }
+            KeyCode::Delete => {
+                if self.cursor_pos < self.text.len() {self.text.remove(self.cursor_pos);}
+            }
+            KeyCode::Enter => {return true;}
+            KeyCode::Char(c) => {
+                if self.text.len() < self.max_size {
+                    self.text.insert(self.cursor_pos, c);
+                    self.cursor_pos += 1;
+                }
+            },
+            _ => {}
+        }
+        false
+    }
+}
+
+impl Widget for &TextEntry {
+    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {
+        let mut line = Line::default();
+        line.push_span(self.text[..self.cursor_pos].iter().collect::<String>());
+        if self.cursor_pos < self.max_size {
+            if self.cursor_pos < self.text.len() {
+                line.push_span(self.text[self.cursor_pos].reversed());
+                if self.cursor_pos + 1 < self.text.len() {
+                    line.push_span(self.text[self.cursor_pos + 1..].iter().collect::<String>());
+                }
+            } else {
+                line.push_span(' '.reversed());
+            }
+        }
+        line.left_aligned()
+            .render(area, buf);
+    }
+}
+
 struct EntryViewer {
-    entry: Option<Entry>
+    entry: Option<Entry>,
+    x_select: usize,
+    y_select: usize,
+    x_size: usize,
+    y_size: usize,
 }
 
 impl EntryViewer {
     fn new() -> Self {
         Self {
-            entry: None
+            entry: None,
+            x_select: 0,
+            y_select: 0,
+            x_size: 0,
+            y_size: 0,
         }
     }
 
     fn add_entry(&mut self, entry: Entry) {
+        match &entry.entry_data {
+            EntryData::Message { .. } => {
+                self.x_select = 0;
+                self.y_select = 0;
+                self.x_size = 1;
+                self.y_size = 1;
+            }
+            EntryData::AccessGroup { write_perms, read_perms, .. } => {
+                self.x_select = 0;
+                self.y_select = 0;
+                self.x_size = 2;
+                self.y_size = 1;
+                if let DefaultedIdSet::Inherit { .. } = write_perms {self.x_size += 1};
+                if let DefaultedIdSet::Inherit { .. } = read_perms  {self.x_size += 1};
+            }
+        }
         self.entry = Some(entry);
     }
 
@@ -202,6 +277,58 @@ impl EntryViewer {
 
     fn as_entry(&self) -> &Option<Entry> {
         &self.entry
+    }
+
+    // true if would've moved past the edge 
+    fn up(&mut self) -> bool {
+        if self.y_select == 0 {
+            true
+        } else {
+            self.y_select -= 1;
+            false
+        }
+    }
+
+    fn down(&mut self) -> bool {
+        self.y_select += 1;
+        if self.y_select >= self.y_size {
+            self.y_select = self.y_size -1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn left(&mut self) -> bool {
+        if self.x_select == 0 {
+            true
+        } else {
+            self.x_select -= 1;
+            false
+        }
+    }
+
+    fn right(&mut self) -> bool {
+        self.x_select += 1;
+        if self.x_select >= self.x_size {
+            self.x_select = self.x_size -1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn enter(&mut self) -> Option<ClientState> {
+        if let Some(entry) = &mut self.entry {
+            match &mut entry.entry_data {
+                EntryData::Message { .. } => None,
+                EntryData::AccessGroup { name: _, write_perms: _, read_perms: _ } => {
+                    Some(ClientState::AccessGroupIdEntry { text_entry: TextEntry::new(16), idx: self.x_select })
+                }
+            }
+        } else {
+            None
+        }
     }
 }
 
@@ -213,7 +340,7 @@ impl Widget for &EntryViewer {
         match &self.entry {
             Some(entry) => {
                 match &entry.entry_data {
-                    EntryData::Message { timestamp, message } => {
+                    EntryData::Message { timestamp: _, message } => {
                         title.push_span(" Message by ");
                         title.push_span(format!("{:016X}", entry.header_data.author_id));
                         title.push_span(" ");
@@ -227,8 +354,9 @@ impl Widget for &EntryViewer {
                         title.push_span(" ");
                         let write_read_titles = [String::from(" Write (Base: "), String::from(" Read (Base: ")];
                         let write_read_layout = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).split(inner_area);
+                        let mut x = 0;
                         for ((perm_set, mut perm_name ), area) in [write_perms, read_perms].iter().copied().zip(write_read_titles).zip(write_read_layout.iter().copied()) {
-                            let block = Block::bordered();
+                            let mut block = Block::bordered();
                             let perm_set_area = block.inner(area);
                             perm_name.push_str(&perm_set.get_default_base().to_string());
                             perm_name.push_str(") ");
@@ -237,18 +365,22 @@ impl Widget for &EntryViewer {
                                     let layout = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).split(perm_set_area);
                                     let mut whitelist = Text::default();
                                     whitelist.push_line("Whitelisted:");
+                                    if self.x_select == x {whitelist = whitelist.bold();}
+                                    x += 1;
                                     for id in whitelist_ids {
                                         let mut line = Line::default();
                                         line.push_span(" -  ".bold());
-                                        line.push_span(id.to_string());
+                                        line.push_span(format!("{:016X}", id));
                                         whitelist.push_line(line);
                                     }
                                     let mut blacklist = Text::default();
                                     blacklist.push_line("Blacklisted:");
+                                    if self.x_select == x {blacklist = blacklist.bold();}
+                                    x += 1;
                                     for id in blacklist_ids {
                                         let mut line = Line::default();
                                         line.push_span(" -  ".bold());
-                                        line.push_span(id.to_string());
+                                        line.push_span(format!("{:016X}", id));
                                         blacklist.push_line(line);
                                     }
                                     whitelist.render(layout[0], buf);
@@ -257,10 +389,12 @@ impl Widget for &EntryViewer {
                                 DefaultedIdSet::White { blacklist_ids } => {
                                     let mut blacklist = Text::default();
                                     blacklist.push_line("Blacklisted:");
+                                    if self.x_select == x {blacklist = blacklist.bold();}
+                                    x += 1;
                                     for id in blacklist_ids {
                                         let mut line = Line::default();
                                         line.push_span(" -  ".bold());
-                                        line.push_span(id.to_string());
+                                        line.push_span(format!("{:016X}", id));
                                         blacklist.push_line(line);
                                     }
                                     blacklist.render(perm_set_area, buf);
@@ -268,10 +402,12 @@ impl Widget for &EntryViewer {
                                 DefaultedIdSet::Black { whitelist_ids } => {
                                     let mut whitelist = Text::default();
                                     whitelist.push_line("Whitelisted:");
+                                    if self.x_select == x {whitelist = whitelist.bold();}
+                                    x += 1;
                                     for id in whitelist_ids {
                                         let mut line = Line::default();
                                         line.push_span(" -  ".bold());
-                                        line.push_span(id.to_string());
+                                        line.push_span(format!("{:016X}", id));
                                         whitelist.push_line(line);
                                     }
                                     whitelist.render(perm_set_area, buf);
@@ -299,6 +435,7 @@ enum ViewerState {
 enum ClientState {
     Viewer(ViewerState),
     WriteVarientSelection(Selector<EntryVariant>),
+    AccessGroupIdEntry{text_entry: TextEntry, idx: usize},
     Blank,
     Error(Vec<DataError>),
 }
@@ -433,7 +570,7 @@ impl Client {
     }
 
     fn set_active_entry(&mut self, entry: Entry) {
-        self.navigator.replace_items(entry.header_data.children_ids.iter().copied().map(|x| (x, x.to_string())).collect()); // temporary
+        self.navigator.replace_items(entry.header_data.children_ids.iter().copied().map(|x| (x, format!("{:016X}", x))).collect()); // temporary
         self.viewer.add_entry(entry);
     }
 
@@ -522,7 +659,18 @@ impl Client {
                         let entry = self.get_entry(self.path.peek().0).unwrap();
                         self.set_active_entry(entry);
                     }
-                    (KeyCode::Char('l') | KeyCode::Right, ViewerState::Content) => {return ClientState::Viewer(ViewerState::Navigate)}
+                    
+                    (KeyCode::Char('l') | KeyCode::Right, ViewerState::Content) => {if self.viewer.right() {return ClientState::Viewer(ViewerState::Navigate)}}
+                    (KeyCode::Char('h') | KeyCode::Left, ViewerState::Content) => {self.viewer.left();}
+                    (KeyCode::Char('k') | KeyCode::Up, ViewerState::Content) => {self.viewer.up();}
+                    (KeyCode::Char('j') | KeyCode::Down, ViewerState::Content) => {self.viewer.down();}
+                    (KeyCode::Enter, ViewerState::Content) => {
+                        if let Some(new_state) = self.viewer.enter() {
+                            self.state.push(state);
+                            return new_state;
+                        }
+                    }
+
                     (KeyCode::Char('h') | KeyCode::Left, ViewerState::Navigate) => {return ClientState::Viewer(ViewerState::Content)}
                     (KeyCode::Char('k') | KeyCode::Up, ViewerState::Navigate) => {self.navigator.up();}
                     (KeyCode::Char('j') | KeyCode::Down, ViewerState::Navigate) => {self.navigator.down();}
@@ -589,6 +737,35 @@ impl Client {
                 }
                 ClientState::WriteVarientSelection(selector)
             }
+            ClientState::AccessGroupIdEntry { mut text_entry, idx } => {
+                if text_entry.handle_input(key_event) {
+                    let Ok(new_id) = u64::from_str_radix(&text_entry.text.iter().collect::<String>(), 16)
+                        else {return ClientState::Error(vec![DataError::NotHex])};
+
+                    let EntryData::AccessGroup { name: _, write_perms, read_perms } = &mut self.viewer.entry.as_mut().unwrap().entry_data 
+                        else {return ClientState::Error(vec![internal_error!()])};
+                    match (idx, write_perms, read_perms) {
+                        (0, DefaultedIdSet::Black { whitelist_ids }, _) => whitelist_ids,
+                        (0, DefaultedIdSet::White { blacklist_ids }, _) => blacklist_ids,
+                        (0, DefaultedIdSet::Inherit { whitelist_ids, blacklist_ids: _ }, _) => whitelist_ids,
+
+                        (1, DefaultedIdSet::Inherit { whitelist_ids: _, blacklist_ids }, _) => blacklist_ids,
+                        (1, _, DefaultedIdSet::Black { whitelist_ids }) => whitelist_ids,
+                        (1, _, DefaultedIdSet::White { blacklist_ids }) => blacklist_ids,
+
+                        (2, DefaultedIdSet::Inherit { .. }, DefaultedIdSet::Black { whitelist_ids }) => whitelist_ids,
+                        (2, DefaultedIdSet::Inherit { .. }, DefaultedIdSet::White { blacklist_ids }) => blacklist_ids,
+                        (2, DefaultedIdSet::Inherit { .. }, DefaultedIdSet::Inherit { whitelist_ids, blacklist_ids: _ }) => whitelist_ids,
+                        (2, _, DefaultedIdSet::Inherit { whitelist_ids: _, blacklist_ids }) => blacklist_ids,
+
+                        (3, DefaultedIdSet::Inherit { .. }, DefaultedIdSet::Inherit { whitelist_ids: _, blacklist_ids }) => blacklist_ids,
+                        (_, _, _) => return ClientState::Error(vec![internal_error!()])
+                    }.push(new_id);
+                    ClientState::Blank
+                } else {
+                    ClientState::AccessGroupIdEntry { text_entry, idx }
+                }
+            }
             ClientState::Error(_) => {
                 return ClientState::Blank;
             }
@@ -630,6 +807,15 @@ impl Widget for &Client {
 
                     Clear.render(selector_popup_area, buf);
                     selector.render(selector_popup_area, buf);
+                }
+                ClientState::AccessGroupIdEntry { text_entry, idx: _ } => {
+                    let mut layout = Layout::horizontal([Constraint::Fill(1), Constraint::Length(18), Constraint::Fill(1)]).split(area);
+                    layout = Layout::vertical([Constraint::Fill(1), Constraint::Length(3), Constraint::Fill(1)]).split(layout[1]);
+                    Clear.render(layout[1], buf);
+                    let block = Block::bordered();
+                    let text_entry_area = block.inner(layout[1]);
+                    block.title(" Enter ID ").render(layout[1], buf);
+                    text_entry.render(text_entry_area, buf);
                 }
                 ClientState::Blank => {}
                 ClientState::Error(errors) => {

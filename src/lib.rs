@@ -51,6 +51,7 @@ pub enum DataError {
     InsufficientBytes,
     InvalidDiscriminant,
     StringError(std::string::FromUtf8Error),
+    NotHex,
     UnsupportedVersion,
 
     DoesNotExist,
