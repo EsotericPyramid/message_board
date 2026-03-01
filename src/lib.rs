@@ -20,6 +20,7 @@ pub const ACCESS_GROUP: u8 = 0x01;
 /// Request & Response
 pub const GET_ENTRY: u8 = 0x00;
 pub const ADD_ENTRY: u8 = 0x01;
+pub const EDIT_ENTRY: u8 = 0x02;
 pub const GET_USER: u8 = 0x20;
 pub const ADD_USER: u8 = 0x21;
 
@@ -61,6 +62,7 @@ pub enum DataError {
 
     MalformedRoot,
     NonChild,
+    EdittedLocation,
 
     InternalError{file: &'static str, line: u32, col: u32},
     OOBUsizeConversion,
@@ -525,23 +527,28 @@ impl UserData {
 ///     variant discriminant (u8) (listed with each variant)
 ///     - variant specific data -
 /// 
-/// GetEntry, 00:
+/// GetEntry, 0x00:
 ///     user_id (u64)
 ///     entry_id (u64)
 /// 
-/// AddEntry, 01:
+/// AddEntry, 0x01:
 ///     user_id (u64)
 ///     - Entry data - 
 /// 
-/// GetUser, 20:
+/// EditEntry, 0x03:
+///     user_id (u64)
+///     - Entry data -
+/// 
+/// GetUser, 0x20:
 ///     user_id (u64)
 /// 
-/// AddUser, 21:
+/// AddUser, 0x21:
 ///     - no data -
 #[derive(PartialEq, Eq, Debug)]
 pub enum BoardRequest {
     GetEntry { user_id: u64, entry_id: u64 },
     AddEntry { user_id: u64, entry: Entry },
+    EditEntry { user_id: u64, entry_id: u64, entry: Entry },
     GetUser { user_id: u64 },
     AddUser,
 }
@@ -563,6 +570,12 @@ impl BoardRequest {
                 let user_id = read_u64(data_iter)?;
                 let entry = Entry::from_data_iter(data_iter)?;
                 BoardRequest::AddEntry { user_id, entry }
+            }
+            EDIT_ENTRY => {
+                let user_id = read_u64(data_iter)?;
+                let entry_id = read_u64(data_iter)?;
+                let entry = Entry::from_data_iter(data_iter)?;
+                BoardRequest::EditEntry { user_id, entry_id, entry }
             }
             // user requests
             GET_USER => { // GetUser
@@ -596,6 +609,12 @@ impl BoardRequest {
                 data.extend_from_slice(&user_id.to_le_bytes());
                 entry.extend_data(data)?;
             },
+            BoardRequest::EditEntry { user_id, entry_id, entry } => {
+                data.push(EDIT_ENTRY);
+                data.extend_from_slice(&user_id.to_le_bytes());
+                data.extend_from_slice(&entry_id.to_le_bytes());
+                entry.extend_data(data)?;
+            }
             BoardRequest::GetUser { user_id } => {
                 data.push(GET_USER);
                 data.extend_from_slice(&user_id.to_le_bytes());
@@ -615,6 +634,7 @@ impl BoardRequest {
 pub enum BoardResponse {
     GetEntry(Entry),
     AddEntry(u64),
+    EditEntry,
     GetUser(UserData),
     AddUser(u64),
 }
@@ -651,6 +671,7 @@ impl BoardResponse {
                 let entry_id = read_u64(&mut data_iter)?;
                 BoardResponse::AddEntry(entry_id)
             }
+            EDIT_ENTRY => BoardResponse::EditEntry,
             // user requests
             GET_USER => { // GetUser
                 let user = UserData::from_data_iter(&mut data_iter)?;
@@ -661,7 +682,6 @@ impl BoardResponse {
                 BoardResponse::AddUser(user_id)
             }
             ERROR => {
-                
                 return Err(internal_error!());
             }
             _ => {return Err(DataError::InvalidDiscriminant)}
@@ -685,6 +705,9 @@ impl BoardResponse {
             Ok(BoardResponse::AddEntry(entry_id)) => {
                 data.push(ADD_ENTRY);
                 data.extend_from_slice(&entry_id.to_le_bytes());
+            }
+            Ok(BoardResponse::EditEntry) => {
+                data.push(EDIT_ENTRY);
             }
             Ok(BoardResponse::GetUser(user)) => {
                 data.push(GET_USER);

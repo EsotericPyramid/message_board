@@ -88,7 +88,7 @@ fn rand_user(mut rng: impl Rng, _char_rng: impl Iterator<Item = char>) -> UserDa
 }
 
 fn rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>) -> BoardRequest {
-    let request = match rng.random_range(0..4) {
+    match rng.random_range(0..5) {
         0 => {
             let user_id = rng.next_u64();
             let entry_id = rng.next_u64();
@@ -101,18 +101,23 @@ fn rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>) -> 
         }
         2 => {
             let user_id = rng.next_u64();
-            BoardRequest::GetUser { user_id }
+            let entry_id = rng.next_u64();
+            let entry = rand_entry(&mut rng, &mut char_rng);
+            BoardRequest::EditEntry { user_id, entry_id, entry }
         }
         3 => {
+            let user_id = rng.next_u64();
+            BoardRequest::GetUser { user_id }
+        }
+        4 => {
             BoardRequest::AddUser
         }
         _ => panic!("Request Type should be in range")
-    };
-    request
+    }
 }
 
 fn rand_response(mut rng: impl Rng, char_rng: impl Iterator<Item = char>) -> MaybeBoardResponse {
-    match rng.random_range(0..4) {
+    match rng.random_range(0..5) {
         0 => {
             Ok(BoardResponse::GetEntry(rand_entry(rng, char_rng)))
         }
@@ -120,9 +125,12 @@ fn rand_response(mut rng: impl Rng, char_rng: impl Iterator<Item = char>) -> May
             Ok(BoardResponse::AddEntry(rng.next_u64()))
         }
         2 => {
-            Ok(BoardResponse::GetUser(rand_user(rng, char_rng)))
+            Ok(BoardResponse::EditEntry)
         }
         3 => {
+            Ok(BoardResponse::GetUser(rand_user(rng, char_rng)))
+        }
+        4 => {
             Ok(BoardResponse::AddUser(rng.next_u64()))
         }
         _ => panic!("Request Type should be in range")

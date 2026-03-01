@@ -234,6 +234,7 @@ impl Widget for &TextEntry {
 
 struct EntryViewer {
     entry: Option<Entry>,
+    has_mutated: bool,
     x_select: usize,
     y_select: usize,
     x_size: usize,
@@ -244,6 +245,7 @@ impl EntryViewer {
     fn new() -> Self {
         Self {
             entry: None,
+            has_mutated: false,
             x_select: 0,
             y_select: 0,
             x_size: 0,
@@ -251,7 +253,8 @@ impl EntryViewer {
         }
     }
 
-    fn add_entry(&mut self, entry: Entry) {
+    #[must_use]
+    fn add_entry(&mut self, entry: Entry) -> Option<Entry> {
         match &entry.entry_data {
             EntryData::Message { .. } => {
                 self.x_select = 0;
@@ -268,15 +271,28 @@ impl EntryViewer {
                 if let DefaultedIdSet::Inherit { .. } = read_perms  {self.x_size += 1};
             }
         }
+        let out = if self.has_mutated {
+            self.take_entry()
+        } else {
+            None
+        };
         self.entry = Some(entry);
+        self.has_mutated = false;
+        out
     }
 
     fn take_entry(&mut self) -> Option<Entry> {
+        self.has_mutated = false;
         self.entry.take()
     }
 
     fn as_entry(&self) -> &Option<Entry> {
         &self.entry
+    }
+
+    fn as_entry_mut(&mut self) -> &mut Option<Entry> {
+        if let Some(_) = self.entry {self.has_mutated |= true;}
+        &mut self.entry
     }
 
     // true if would've moved past the edge 
@@ -319,8 +335,8 @@ impl EntryViewer {
     }
 
     fn enter(&mut self) -> Option<ClientState> {
-        if let Some(entry) = &mut self.entry {
-            match &mut entry.entry_data {
+        if let Some(entry) = &self.entry {
+            match entry.entry_data {
                 EntryData::Message { .. } => None,
                 EntryData::AccessGroup { name: _, write_perms: _, read_perms: _ } => {
                     Some(ClientState::AccessGroupIdEntry { text_entry: TextEntry::new(16), idx: self.x_select })
@@ -527,7 +543,7 @@ impl Client {
         let _ = client.create_user(); // FIXME: should notify in some way if a new one was minted
         let entry = client.get_entry(ROOT_ID)?;
         client.path.push(ROOT_ID, &entry)?;
-        client.set_active_entry(entry);
+        client.set_active_entry(0, entry); // FIXME: scuff, really there is no "last" entry_id
 
         Ok(client)
     }
@@ -563,15 +579,24 @@ impl Client {
     }
 
     fn write_entry(&mut self, entry: Entry) -> Result<u64, DataError> {
-        let request = BoardRequest::AddEntry { user_id: self.user_id.unwrap(), entry: entry };
+        let request = BoardRequest::AddEntry { user_id: self.user_id.unwrap(), entry };
         let response = self.send_request(request)?;
         let BoardResponse::AddEntry(entry_id) = response else {return Err(internal_error!())};
         Ok(entry_id)
     }
 
-    fn set_active_entry(&mut self, entry: Entry) {
+    fn edit_entry(&mut self, entry_id: u64, entry: Entry) -> Result<(), DataError> {
+        let request = BoardRequest::EditEntry { user_id: self.user_id.unwrap(), entry_id, entry };
+        let response = self.send_request(request)?;
+        let BoardResponse::EditEntry = response else {return Err(internal_error!())};
+        Ok(())
+    }
+
+    fn set_active_entry(&mut self, last_entry_id: u64, entry: Entry) {
         self.navigator.replace_items(entry.header_data.children_ids.iter().copied().map(|x| (x, format!("{:016X}", x))).collect()); // temporary
-        self.viewer.add_entry(entry);
+        if let Some(old_entry) = self.viewer.add_entry(entry) {
+            self.edit_entry(last_entry_id, old_entry);
+        }
     }
 
     fn get_user(&mut self, user_id: u64) -> Result<UserData, DataError> {
@@ -600,6 +625,11 @@ impl Client {
 
             self.handle_events()?;
         }
+        if self.viewer.has_mutated {
+            if let Some(entry) = self.viewer.take_entry() {
+                self.edit_entry(self.path.peek().0, entry);
+            }
+        }
         Ok(())
     }
 
@@ -615,9 +645,10 @@ impl Client {
                         self.exit = true;
                     }
                     KeyCode::Esc => {
-                        self.state.pop();
-                        if self.state.is_empty() {
+                        if self.state.len() == 1 {
                             self.exit = true;
+                        } else {
+                            self.state.pop();
                         }
                     }
                     _ => {
@@ -655,11 +686,24 @@ impl Client {
                         return ClientState::WriteVarientSelection(selector);
                     }
                     (KeyCode::Char('H') | KeyCode::Left, _) if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
-                        self.path.pop();
+                        let last_entry_id = self.path.pop();
                         let entry = self.get_entry(self.path.peek().0).unwrap();
-                        self.set_active_entry(entry);
+                        if let Some((last_entry_id, _)) = last_entry_id {
+                            self.set_active_entry(last_entry_id, entry);
+                        }
                     }
-                    
+                    (KeyCode::Char('r'), _) => {
+                        let entry_id = self.path.peek().0;
+                        let entry = self.get_entry(entry_id);
+                        match entry {
+                            Ok(entry) => self.set_active_entry(entry_id, entry),
+                            Err(e) => {
+                                self.state.push(state);
+                                return ClientState::Error(vec![e]);
+                            }
+                        }
+                    }
+
                     (KeyCode::Char('l') | KeyCode::Right, ViewerState::Content) => {if self.viewer.right() {return ClientState::Viewer(ViewerState::Navigate)}}
                     (KeyCode::Char('h') | KeyCode::Left, ViewerState::Content) => {self.viewer.left();}
                     (KeyCode::Char('k') | KeyCode::Up, ViewerState::Content) => {self.viewer.up();}
@@ -675,11 +719,12 @@ impl Client {
                     (KeyCode::Char('k') | KeyCode::Up, ViewerState::Navigate) => {self.navigator.up();}
                     (KeyCode::Char('j') | KeyCode::Down, ViewerState::Navigate) => {self.navigator.down();}
                     (KeyCode::Enter, ViewerState::Navigate) => 'block: {
+                        let last_entry_id = self.path.peek().0;
                         let Some((_, (entry_id, _))) = self.navigator.selection() else {self.navigator.select(); break 'block};
                         let entry_id = *entry_id;
                         let Ok(entry) = self.get_entry(entry_id) else {break 'block}; // needs a more proper error
                         self.path.push(entry_id, &entry).unwrap();
-                        self.set_active_entry(entry);
+                        self.set_active_entry(last_entry_id, entry);
                         return ClientState::Viewer(ViewerState::Content);
                     }
                     _ => {}
@@ -720,6 +765,21 @@ impl Client {
                                     }
                                 })
                             }
+                            EntryVariant::AccessGroup => {
+                                Some(Entry {
+                                    header_data: HeaderData { 
+                                        version: ENTRY_FILE_VERSION, 
+                                        parent_id: self.path.peek().0, 
+                                        children_ids: Vec::new(), 
+                                        author_id: self.user_id.unwrap(), 
+                                    },
+                                    entry_data: EntryData::AccessGroup { 
+                                        name: String::from("test"), 
+                                        write_perms: DefaultedIdSet::Inherit { whitelist_ids: Vec::new(), blacklist_ids: Vec::new() }, 
+                                        read_perms: DefaultedIdSet::Inherit { whitelist_ids: Vec::new(), blacklist_ids: Vec::new() },
+                                    }
+                                })
+                            }
                             _ => {
                                 None
                             }
@@ -742,7 +802,7 @@ impl Client {
                     let Ok(new_id) = u64::from_str_radix(&text_entry.text.iter().collect::<String>(), 16)
                         else {return ClientState::Error(vec![DataError::NotHex])};
 
-                    let EntryData::AccessGroup { name: _, write_perms, read_perms } = &mut self.viewer.entry.as_mut().unwrap().entry_data 
+                    let EntryData::AccessGroup { name: _, write_perms, read_perms } = &mut self.viewer.as_entry_mut().as_mut().unwrap().entry_data 
                         else {return ClientState::Error(vec![internal_error!()])};
                     match (idx, write_perms, read_perms) {
                         (0, DefaultedIdSet::Black { whitelist_ids }, _) => whitelist_ids,

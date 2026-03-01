@@ -261,7 +261,7 @@ impl MessageBoard {
         Entry::from_data_iter(&mut self.get_entry_data_iter(entry_id)?)
     }
 
-    fn add_entry(&self, user_id:u64, entry_id: u64, entry: Entry) -> Result<(), DataError> {
+    fn add_entry(&self, user_id: u64, entry_id: u64, entry: Entry) -> Result<(), DataError> {
         let mut parent = self.get_entry(entry.header_data.parent_id)?;
         parent.header_data.children_ids.push(entry_id);
         self.overwrite_entry(entry.header_data.parent_id, parent)?;
@@ -272,6 +272,10 @@ impl MessageBoard {
 
         self.write_entry(entry_id, entry)?;
         Ok(())
+    }
+
+    fn edit_entry(&self, user_id: u64, entry_id: u64, entry: Entry) -> Result<(), DataError> {
+        self.overwrite_entry(entry_id, entry)
     }
 
     /// checks if the user has read_perms to the *children* of the entry
@@ -357,6 +361,17 @@ impl MessageBoard {
                         let entry_id = MessageBoard::generate_unique_id(rng, &board.entry_ids.read().unwrap());
                         board.add_entry(user_id, entry_id, entry)?;
                         Ok(BoardResponse::AddEntry(entry_id))
+                    }
+                    BoardRequest::EditEntry { user_id, entry_id, entry } => {
+                        let old_entry = board.get_entry(entry_id)?;
+                        if entry.header_data.author_id != user_id || old_entry.header_data.author_id != user_id {
+                            return Err(DataError::InsufficientPerms)
+                        }
+                        if (entry.header_data.children_ids != old_entry.header_data.children_ids) | (entry.header_data.parent_id != old_entry.header_data.parent_id) {
+                            return Err(DataError::EdittedLocation)
+                        }
+                        board.edit_entry(user_id, entry_id, entry)?;
+                        Ok(BoardResponse::EditEntry)
                     }
                     BoardRequest::GetUser { user_id } => {
                         let user = board.get_user(user_id)?;
