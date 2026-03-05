@@ -545,7 +545,7 @@ impl Server {
 
                 for (id, message) in outgoing_queue_rx.try_iter() {
                     let Some(client) = clients_write.get_mut(&id) else {unresolved_messages.push((id, message)); continue;};
-                    let message = BoardResponse::into_data(&message).unwrap_or_else(|_| {println!("Failed to encode server response"); BoardResponse::into_data(&Err(internal_error!())).unwrap()});
+                    let message = MaybeBoardResponse::into_data(&message).unwrap_or_else(|_| {println!("Failed to encode server response"); MaybeBoardResponse::into_data(&Err(internal_error!())).unwrap()});
                     println!("Sending {} byte message", message.len());
                     let _ = client.write_all(&(message.len() as u64).to_le_bytes());
                     let _ = client.write_all(&message); // should push to unresolved_messages
@@ -566,7 +566,7 @@ impl Server {
                     drop(global_id_map); // getting rid of the guard
                     for (id, message) in unresolved_messages.drain(..) {
                         let Some(client) = clients_write.get_mut(&id) else {eprintln!("client for id not found, dropping unresolved message"); continue;};
-                        let message = BoardResponse::into_data(&message).unwrap_or_else(|_| {println!("Failed to encode server response"); BoardResponse::into_data(&Err(internal_error!())).unwrap()});
+                        let message = MaybeBoardResponse::into_data(&message).unwrap_or_else(|_| {println!("Failed to encode server response"); MaybeBoardResponse::into_data(&Err(internal_error!())).unwrap()});
                         println!("Sending {} byte message", message.len());
                         let _ = client.write_all(&(message.len() as u64).to_le_bytes());
                         let _ = client.write_all(&message); // should push to unresolved_messages

@@ -46,6 +46,24 @@ pub mod utils {
 }
 }
 
+pub trait AsData {
+    fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError>;
+    fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> where Self: Sized;
+
+    fn size_hint(&self) -> usize {0}
+
+    fn into_data(&self) -> Result<Vec<u8>, DataError> {
+        let mut out= Vec::with_capacity(self.size_hint());
+        self.extend_data(&mut out)?;
+        Ok(out)
+    }
+
+    fn from_data(data: &[u8]) -> Result<Self, DataError> where Self: Sized {
+        let mut data_iter = data.iter().copied();
+        Self::from_data_iter(&mut data_iter)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum DataError { 
     IncorrectMagicNum,
@@ -123,6 +141,8 @@ macro_rules! bounded_usize {
 
 /// current file version: 0
 /// 
+/// NOTE: don't forget to update size hints
+/// 
 /// data format, numbers are little endian: 
 ///     magic number (u16):         0x1234,   
 ///     file version number (u8):   00,
@@ -155,13 +175,8 @@ pub struct Entry {
     pub entry_data: EntryData,
 }
 
-impl Entry {
-    pub fn from_data(data: &[u8]) -> Result<Self, DataError> {
-        let mut data_iter = data.iter().copied();
-        Self::from_data_iter(&mut data_iter)
-    }
-
-    pub fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> {
+impl AsData for Entry {
+    fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> {
         let (header_data, entry_type) = HeaderData::from_data_iter(data_iter)?;
         let entry_data = EntryData::from_data_iter(data_iter, entry_type)?;
         Ok(Entry {
@@ -170,16 +185,14 @@ impl Entry {
         })
     }
 
-    pub fn into_data(&self) -> Result<Vec<u8>, DataError> {
-        let mut data = Vec::new();
-        self.extend_data(&mut data)?;
-        Ok(data)
-    }
-
-    pub fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
+    fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
         self.header_data.extend_data(self.entry_data.get_discriminant(), data)?;
         self.entry_data.extend_data(data)?;
         Ok(())
+    }
+
+    fn size_hint(&self) -> usize {
+        self.header_data.size_hint() + self.entry_data.size_hint()
     }
 }
 
@@ -235,6 +248,10 @@ impl HeaderData {
         data.extend(self.children_ids.iter().flat_map(|x| x.to_le_bytes()));
         data.extend_from_slice(&self.author_id.to_le_bytes());
         Ok(())
+    }
+
+    pub fn size_hint(&self) -> usize {
+        2 + 1 + 1 + 8 + 2 + self.children_ids.len() * 8 + 8
     }
 }
 
@@ -327,8 +344,10 @@ impl DefaultedIdSet {
             Self::White { blacklist_ids: _ } => DefaultBase::White,
         }
     }
+}
 
-    pub fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> {
+impl AsData for DefaultedIdSet {
+    fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> {
         fn read_vec(data_iter: &mut impl Iterator<Item = u8>) -> Result<Vec<u64>, DataError> {
             let len = read_u32(data_iter)? as usize;
             let mut vec = Vec::with_capacity(len);
@@ -355,7 +374,7 @@ impl DefaultedIdSet {
         })
     }
 
-    pub fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
+    fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
         fn write_vec(vec: &[u64], data: &mut Vec<u8>) -> Result<(), DataError> {
             bounded_usize!(vec.len(), u32)?;
             data.extend_from_slice(&(vec.len() as u32).to_le_bytes());
@@ -377,6 +396,20 @@ impl DefaultedIdSet {
             }
         }
         Ok(())
+    }
+
+    fn size_hint(&self) -> usize {
+        match self {
+            DefaultedIdSet::Inherit { whitelist_ids, blacklist_ids } => {
+                1 + 4 + whitelist_ids.len() * 8 + 4 + blacklist_ids.len() * 8
+            }
+            DefaultedIdSet::Black { whitelist_ids } => {
+                1 + 4 + whitelist_ids.len() * 8
+            }
+            DefaultedIdSet::White { blacklist_ids } => {
+                1 + 4 + blacklist_ids.len() * 8
+            }
+        }
     }
 }
 
@@ -401,10 +434,6 @@ impl EntryData {
         }
     }
 
-    pub fn from_data(data: &[u8], entry_type: u8) -> Result<Self, DataError> {
-        Self::from_data_iter(&mut data.iter().copied(), entry_type)
-    }
-
     pub fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>, entry_type: u8) -> Result<Self, DataError> {
         Ok(match entry_type {
             MESSAGE => { // Message
@@ -425,12 +454,6 @@ impl EntryData {
         })
     }
 
-    pub fn into_data(&self) -> Result<Vec<u8>, DataError> {
-        let mut data = Vec::new();
-        self.extend_data(&mut data)?;
-        Ok(data)
-    }
-
     pub fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
         match self {
             Self::Message { timestamp, message } => {
@@ -448,6 +471,17 @@ impl EntryData {
             }
         }
         Ok(())
+    }
+
+    pub fn size_hint(&self) -> usize {
+        match self {
+            EntryData::Message { message, .. } => {
+                8 + 4 + message.as_bytes().len()
+            }
+            EntryData::AccessGroup { name, write_perms, read_perms } => {
+                4 + name.as_bytes().len() + write_perms.size_hint() + read_perms.size_hint()
+            }
+        }
     }
 }
 
@@ -477,21 +511,19 @@ impl UserData {
             entry_ids: Vec::new() 
         }
     }
+}
 
-    pub fn from_data(data: &[u8]) -> Result<Self, DataError> {
-        Self::from_data_iter(&mut data.iter().copied())
-    }
-
-    /// currrent file version 0
-    /// 
-    /// data format, numbers are little endian:
-    ///     magic number (u16): see `USER_MAGIC_NUMBER`
-    ///     version number (u8)
-    ///     number of entry ids (u32),
-    ///     entry id 1 (u64),
-    ///     ...
-    ///     entry id n (u64)
-    pub fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> {
+/// currrent file version 0
+/// 
+/// data format, numbers are little endian:
+///     magic number (u16): see `USER_MAGIC_NUMBER`
+///     version number (u8)
+///     number of entry ids (u32),
+///     entry id 1 (u64),
+///     ...
+///     entry id n (u64)
+impl AsData for UserData {
+    fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> {
         let magic_number = read_u16(data_iter)?;
         if magic_number != USER_MAGIC_NUMBER {return Err(DataError::IncorrectMagicNum)};
         let version = read_u8(data_iter)?;
@@ -506,19 +538,17 @@ impl UserData {
         })
     }
 
-    pub fn into_data(&self) -> Result<Vec<u8>, DataError> {
-        let mut data = Vec::new();
-        self.extend_data(&mut data)?;
-        Ok(data)
-    }
-
-    pub fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
+    fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
         data.extend_from_slice(&USER_MAGIC_NUMBER.to_le_bytes());
         data.push(USER_FILE_VERSION);
         bounded_usize!(self.entry_ids.len(), u32)?;
         data.extend_from_slice(&(self.entry_ids.len() as u32).to_le_bytes());
         data.extend(self.entry_ids.iter().flat_map(|x| x.to_le_bytes()));
         Ok(())
+    }
+
+    fn size_hint(&self) -> usize {
+        2 + 1 + 4 + self.entry_ids.len() * 8
     }
 }
 
@@ -553,9 +583,38 @@ pub enum BoardRequest {
     AddUser,
 }
 
-impl BoardRequest {
-    pub fn from_data(data: &[u8]) -> Result<Self, DataError> {
-        let data_iter = &mut data.iter().copied();
+impl AsData for BoardRequest {
+    fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
+        data.push(REQUEST_FORMAT_VERSION); //version
+        match self {
+            BoardRequest::GetEntry { user_id, entry_id } => {
+                data.push(GET_ENTRY);
+                data.extend_from_slice(&user_id.to_le_bytes());
+                data.extend_from_slice(&entry_id.to_le_bytes());
+            },
+            BoardRequest::AddEntry { user_id, entry } => {
+                data.push(ADD_ENTRY);
+                data.extend_from_slice(&user_id.to_le_bytes());
+                entry.extend_data(data)?;
+            },
+            BoardRequest::EditEntry { user_id, entry_id, entry } => {
+                data.push(EDIT_ENTRY);
+                data.extend_from_slice(&user_id.to_le_bytes());
+                data.extend_from_slice(&entry_id.to_le_bytes());
+                entry.extend_data(data)?;
+            }
+            BoardRequest::GetUser { user_id } => {
+                data.push(GET_USER);
+                data.extend_from_slice(&user_id.to_le_bytes());
+            },
+            BoardRequest::AddUser => {
+                data.push(ADD_USER);
+            },
+        };
+        Ok(())
+    }
+
+    fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> where Self: Sized {
         let version = read_u8(data_iter)?;
         if version != 0x00 {return Err(DataError::UnsupportedVersion)};
         let discriminant = read_u8(data_iter)?;
@@ -590,40 +649,24 @@ impl BoardRequest {
         })
     }
 
-    pub fn into_data(&self) -> Result<Vec<u8>, DataError> {
-        let mut data = Vec::new();
-        self.extend_data(&mut data)?;
-        Ok(data)
-    }
-
-    pub fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
-        data.push(REQUEST_FORMAT_VERSION); //version
+    fn size_hint(&self) -> usize {
         match self {
-            BoardRequest::GetEntry { user_id, entry_id } => {
-                data.push(GET_ENTRY);
-                data.extend_from_slice(&user_id.to_le_bytes());
-                data.extend_from_slice(&entry_id.to_le_bytes());
-            },
-            BoardRequest::AddEntry { user_id, entry } => {
-                data.push(ADD_ENTRY);
-                data.extend_from_slice(&user_id.to_le_bytes());
-                entry.extend_data(data)?;
-            },
-            BoardRequest::EditEntry { user_id, entry_id, entry } => {
-                data.push(EDIT_ENTRY);
-                data.extend_from_slice(&user_id.to_le_bytes());
-                data.extend_from_slice(&entry_id.to_le_bytes());
-                entry.extend_data(data)?;
+            BoardRequest::GetEntry { .. } => {
+                1 + 1 + 8 + 8
             }
-            BoardRequest::GetUser { user_id } => {
-                data.push(GET_USER);
-                data.extend_from_slice(&user_id.to_le_bytes());
-            },
+            BoardRequest::AddEntry { entry, .. } => {
+                1 + 1 + 8 + entry.size_hint()
+            }
+            BoardRequest::EditEntry { entry, .. } => {
+                1 + 1 + 8 + entry.size_hint()
+            }
+            BoardRequest::GetUser { .. } => {
+                1 + 1 + 8
+            }
             BoardRequest::AddUser => {
-                data.push(ADD_USER);
-            },
-        };
-        Ok(())
+                1 + 1
+            }
+        }
     }
 }
 
@@ -645,59 +688,27 @@ pub type MaybeBoardResponse = Result<BoardResponse, DataError>;
 ///     version (u8): 0
 ///     variant discriminant (u8) (listed with each variant)
 /// 
-/// GetEntry, 00:
+/// GetEntry, 0x00:
 ///     - Entry Data -
 /// 
-/// AddEntry, 01:
+/// AddEntry, 0x01:
 ///     entry_id (u64)
 /// 
-/// GetUser, 20:
+/// EditEntry, 0x02:
+///     - no data -
+/// 
+/// GetUser, 0x20:
 ///     - User Data -
 /// 
-/// AddUser, 21:
+/// AddUser, 0x21:
 ///     user_id (u64)
-impl BoardResponse {
-    pub fn from_data(data: &[u8]) -> Result<Self, DataError> {
-        let mut data_iter = data.iter().copied();
-        let version = read_u8(&mut data_iter)?;
-        if version != 0 {return Err(DataError::UnsupportedVersion)}
-        Ok(match read_u8(&mut data_iter)? {
-            // entry requests
-            GET_ENTRY => { // GetEntry
-                let entry = Entry::from_data_iter(&mut data_iter)?;
-                BoardResponse::GetEntry(entry)
-            }
-            ADD_ENTRY => { // AddEntry
-                let entry_id = read_u64(&mut data_iter)?;
-                BoardResponse::AddEntry(entry_id)
-            }
-            EDIT_ENTRY => BoardResponse::EditEntry,
-            // user requests
-            GET_USER => { // GetUser
-                let user = UserData::from_data_iter(&mut data_iter)?;
-                BoardResponse::GetUser(user)
-            }
-            ADD_USER => { // AddUser
-                let user_id = read_u64(&mut data_iter)?;
-                BoardResponse::AddUser(user_id)
-            }
-            ERROR => {
-                return Err(internal_error!());
-            }
-            _ => {return Err(DataError::InvalidDiscriminant)}
-        })
-
-    }
-
-    pub fn into_data(val: &MaybeBoardResponse) -> Result<Vec<u8>, DataError> {
-        let mut out = Vec::new();
-        Self::extend_data(val, &mut out)?;
-        Ok(out)
-    }
-
-    pub fn extend_data(val: &MaybeBoardResponse, data: &mut Vec<u8>) -> Result<(), DataError> {
+/// 
+/// Error, 0xff:
+///     - no data - 
+impl AsData for MaybeBoardResponse {
+    fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
         data.push(RESPONSE_FORMAT_VERSION);
-        match val {
+        match self {
             Ok(BoardResponse::GetEntry(entry)) => {
                 data.push(GET_ENTRY);
                 entry.extend_data(data)?;
@@ -723,5 +734,58 @@ impl BoardResponse {
             }
         }
         Ok(())
+    }
+
+    fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> where Self: Sized {
+        let version = read_u8(data_iter)?;
+        if version != 0 {return Err(DataError::UnsupportedVersion)}
+        Ok(match read_u8(data_iter)? {
+            // entry requests
+            GET_ENTRY => { // GetEntry
+                let entry = Entry::from_data_iter(data_iter)?;
+                Ok(BoardResponse::GetEntry(entry))
+            }
+            ADD_ENTRY => { // AddEntry
+                let entry_id = read_u64(data_iter)?;
+                Ok(BoardResponse::AddEntry(entry_id))
+            }
+            EDIT_ENTRY => Ok(BoardResponse::EditEntry),
+            // user requests
+            GET_USER => { // GetUser
+                let user = UserData::from_data_iter(data_iter)?;
+                Ok(BoardResponse::GetUser(user))
+            }
+            ADD_USER => { // AddUser
+                let user_id = read_u64(data_iter)?;
+                Ok(BoardResponse::AddUser(user_id))
+            }
+            ERROR => {
+                Err(internal_error!())
+            }
+            _ => {return Err(DataError::InvalidDiscriminant)}
+        })
+    }
+
+    fn size_hint(&self) -> usize {
+        match self {
+            Ok(BoardResponse::GetEntry(entry)) => {
+                1 + 1 + entry.size_hint()
+            }
+            Ok(BoardResponse::AddEntry(_)) => {
+                1 + 1 + 8
+            }
+            Ok(BoardResponse::EditEntry) => {
+                1 + 1
+            }
+            Ok(BoardResponse::GetUser(user)) => {
+                1 + 1 + user.size_hint()
+            }
+            Ok(BoardResponse::AddUser(_)) => {
+                1 + 1 + 8
+            }
+            Err(_) => {
+                1 + 1
+            }
+        }
     }
 }

@@ -173,6 +173,6 @@ fn response_data_conversion() {
     let mut char_rng = get_char_rng(rng.clone());
     for _ in 0..RANDOM_TEST_RETRIES {
         let response = rand_response(&mut rng, &mut char_rng);
-        assert_eq!(response, BoardResponse::from_data(&BoardResponse::into_data(&response).unwrap()), "Invalid Request Conversion");
+        assert_eq!(response, MaybeBoardResponse::from_data(&MaybeBoardResponse::into_data(&response).unwrap()).unwrap(), "Invalid Request Conversion");
     }
 }

@@ -356,13 +356,14 @@ impl Widget for &EntryViewer {
         match &self.entry {
             Some(entry) => {
                 match &entry.entry_data {
-                    EntryData::Message { timestamp: _, message } => {
+                    EntryData::Message { timestamp, message } => {
                         title.push_span(" Message by ");
                         title.push_span(format!("{:016X}", entry.header_data.author_id));
+                        title.push_span(", written/editted ");
+                        title.push_span(chrono::DateTime::from_timestamp_secs(*timestamp as i64).unwrap().to_string());
                         title.push_span(" ");
 
                         Paragraph::new(message as &str).render(inner_area, buf);
-
                     }
                     EntryData::AccessGroup { name, write_perms, read_perms } => {
                         title.push_span(" Access Group - ");
@@ -559,7 +560,7 @@ impl Client {
         let _ = std::fs::write(&real_rc_config, &config.to_string());
     }
 
-    fn send_request(&mut self, request: BoardRequest) -> Result<BoardResponse, DataError> {
+    fn send_request(&mut self, request: BoardRequest) -> Result<MaybeBoardResponse, DataError> {
         let request = request.into_data()?;
         let _ = self.stream.write_all(&(request.len() as u64).to_le_bytes());
         let _ = self.stream.write_all(&request);
@@ -568,26 +569,26 @@ impl Client {
         let num_bytes = u64::from_le_bytes(num_bytes) as usize;
         let mut buffer = vec![0; num_bytes];
         let _ = self.stream.read_exact(&mut buffer);
-        BoardResponse::from_data(&buffer)
+        MaybeBoardResponse::from_data(&buffer)
     }
 
     fn get_entry(&mut self, entry_id: u64) -> Result<Entry, DataError> {
         let request = BoardRequest::GetEntry { user_id: self.user_id.unwrap(), entry_id };
-        let response = self.send_request(request)?;
+        let response = self.send_request(request)??;
         let BoardResponse::GetEntry(entry) = response else {return Err(internal_error!())};
         Ok(entry)
     }
 
     fn write_entry(&mut self, entry: Entry) -> Result<u64, DataError> {
         let request = BoardRequest::AddEntry { user_id: self.user_id.unwrap(), entry };
-        let response = self.send_request(request)?;
+        let response = self.send_request(request)??;
         let BoardResponse::AddEntry(entry_id) = response else {return Err(internal_error!())};
         Ok(entry_id)
     }
 
     fn edit_entry(&mut self, entry_id: u64, entry: Entry) -> Result<(), DataError> {
         let request = BoardRequest::EditEntry { user_id: self.user_id.unwrap(), entry_id, entry };
-        let response = self.send_request(request)?;
+        let response = self.send_request(request)??;
         let BoardResponse::EditEntry = response else {return Err(internal_error!())};
         Ok(())
     }
@@ -601,7 +602,7 @@ impl Client {
 
     fn get_user(&mut self, user_id: u64) -> Result<UserData, DataError> {
         let request = BoardRequest::GetUser { user_id };
-        let response = self.send_request(request)?;
+        let response = self.send_request(request)??;
         let BoardResponse::GetUser(user) = response else {return Err(internal_error!())};
         Ok(user)
     }
@@ -609,7 +610,7 @@ impl Client {
     fn create_user(&mut self) -> Result<bool, DataError> {
         if let Some(_) = self.user_id {return Ok(false)}
         let request = BoardRequest::AddUser;
-        let response = self.send_request(request)?;
+        let response = self.send_request(request)??;
         let BoardResponse::AddUser(user_id) = response else {return Err(internal_error!())};
         self.user_id = Some(user_id);
         self.edit_config(|config| config["user_id"] = toml::Value::Integer(user_id as i64));
