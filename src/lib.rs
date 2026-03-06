@@ -566,7 +566,8 @@ impl AsData for UserData {
 ///     - Entry data - 
 /// 
 /// EditEntry, 0x03:
-///     user_id (u64)
+///     user_id (u64),
+///     entry_id (u64)
 ///     - Entry data -
 /// 
 /// GetUser, 0x20:
@@ -658,7 +659,7 @@ impl AsData for BoardRequest {
                 1 + 1 + 8 + entry.size_hint()
             }
             BoardRequest::EditEntry { entry, .. } => {
-                1 + 1 + 8 + entry.size_hint()
+                1 + 1 + 8 + 8 + entry.size_hint()
             }
             BoardRequest::GetUser { .. } => {
                 1 + 1 + 8

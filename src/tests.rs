@@ -148,12 +148,32 @@ fn entry_data_conversion() {
 }
 
 #[test]
+fn entry_size_hint() {
+    let mut rng = rand::rng();
+    let mut char_rng = get_char_rng(rng.clone());
+    for _ in 0..RANDOM_TEST_RETRIES {
+        let entry = rand_entry(&mut rng, &mut char_rng);
+        assert_eq!(entry.size_hint(), entry.into_data().unwrap().len(), "Incorrect size hint");
+    }
+}
+
+#[test]
 fn user_data_conversion() {
     let mut rng = rand::rng();
     let mut char_rng = get_char_rng(rng.clone());
     for _ in 0..RANDOM_TEST_RETRIES {
         let user = rand_user(&mut rng, &mut char_rng);
         assert_eq!(user, UserData::from_data(&user.into_data().unwrap()).unwrap(), "Invalid User Conversion");
+    }
+}
+
+#[test]
+fn user_size_hint() {
+    let mut rng = rand::rng();
+    let mut char_rng = get_char_rng(rng.clone());
+    for _ in 0..RANDOM_TEST_RETRIES {
+        let user = rand_user(&mut rng, &mut char_rng);
+        assert_eq!(user.size_hint(), user.into_data().unwrap().len(), "Incorrect size hint");
     }
 }
 
@@ -168,11 +188,32 @@ fn request_data_conversion() {
 }
 
 #[test]
+fn request_size_hint() {
+    let mut rng = rand::rng();
+    let mut char_rng = get_char_rng(rng.clone());
+    for _ in 0..RANDOM_TEST_RETRIES {
+        let request = rand_request(&mut rng, &mut char_rng);
+        assert_eq!(request.size_hint(), request.into_data().unwrap().len(), "Incorrect size hint");
+    }
+}
+
+#[test]
 fn response_data_conversion() {
     let mut rng = rand::rng();
     let mut char_rng = get_char_rng(rng.clone());
     for _ in 0..RANDOM_TEST_RETRIES {
         let response = rand_response(&mut rng, &mut char_rng);
         assert_eq!(response, MaybeBoardResponse::from_data(&MaybeBoardResponse::into_data(&response).unwrap()).unwrap(), "Invalid Request Conversion");
+    }
+}
+
+
+#[test]
+fn response_size_hint() {
+    let mut rng = rand::rng();
+    let mut char_rng = get_char_rng(rng.clone());
+    for _ in 0..RANDOM_TEST_RETRIES {
+        let response = rand_response(&mut rng, &mut char_rng);
+        assert_eq!(response.size_hint(), response.into_data().unwrap().len(), "Incorrect size hint");
     }
 }
