@@ -1,16 +1,22 @@
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+#![allow(unused_results)]
+
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::terminal;
 use message_board::*;
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Stylize};
-use ratatui::widgets::{Clear, BorderType};
+use ratatui::style::{Style, Stylize};
+use ratatui::widgets::{Clear};
 use std::io::{Read, Write};
 use std::net::*;
+use std::ops::DerefMut;
 use ratatui::{
     text::{Line, Text},
     widgets::{Block, Paragraph, Widget},
     layout::Rect,
     buffer::Buffer,
 };
+use std::cell::RefCell;
+use std::rc::Rc;
 use message_board::utils::*;
 use message_board::internal_error;
 
@@ -21,6 +27,118 @@ const ENTRY_VARIANTS: [EntryVariant; 2] = [
 
 const RC_FILE: &str = ".config/message_board/client_rc.toml";
 
+
+struct Config {
+    user_id: Option<u64>,
+    server_address: String,
+}
+
+impl Config {
+    fn from_toml(config_toml: &toml::Table) -> Self {
+        let user_id_val = &config_toml["user_id"];
+        let user_id = match user_id_val {
+            toml::Value::Integer(id) => Some(*id as u64), //scuff
+            toml::Value::String(str) if str == "None" => None,
+            _ => {panic!("The client RC file was misformatted")}
+        };
+        let toml::Value::String(server_address) = &config_toml["address"] else {panic!("The client RC file was misformatted")};
+        Config { user_id, server_address: server_address.clone() }
+    }
+
+    fn into_toml(self) -> toml::Table {
+        let mut config_toml = toml::Table::new();
+        let user_id = match self.user_id {
+            Some(id) => toml::Value::Integer(id as i64),
+            None => toml::Value::String(String::from("None")),
+        };
+        config_toml.insert(String::from("user_id"), user_id);
+        config_toml.insert(String::from("address"), toml::Value::String(self.server_address));
+        config_toml
+    }
+}
+
+fn edit_config<F: FnOnce(&mut Config)>(f: F) {
+    let user_home = std::env::home_dir().unwrap();
+    let mut real_rc_config = user_home.clone();
+    real_rc_config.push(RC_FILE);
+    let mut config = Config::from_toml(&std::fs::read_to_string(&real_rc_config)
+        .map(|str| str.parse::<toml::Table>().expect("The Server Rc was misformatted")).unwrap());
+    f(&mut config);
+    let _ = std::fs::write(&real_rc_config, &config.into_toml().to_string());
+}
+
+fn get_config() -> Config {
+    let user_home = std::env::home_dir().unwrap();
+    let mut real_rc_config = user_home.clone();
+    real_rc_config.push(RC_FILE);
+    Config::from_toml(&std::fs::read_to_string(&real_rc_config)
+        .map(|str| str.parse::<toml::Table>().expect("The Server Rc was misformatted")).unwrap())
+}
+
+fn validate_config() {
+    let user_home = std::env::home_dir().unwrap();
+    let mut real_rc_config = user_home.clone();
+    real_rc_config.push(RC_FILE);
+    let mut stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    let mut input_buffer = String::new();
+    let mut rc_config_result = std::fs::read_to_string(&real_rc_config).map(|str| str.parse::<toml::Table>().expect("The Client Rc was misformatted"));
+    if let Err(ref e) = rc_config_result {
+        match e.kind() {
+            std::io::ErrorKind::NotFound => {
+                print!("Config file does not exist, create a new one? (y/n): ");
+                let _ = stdout.flush();
+                input_buffer.clear();
+                let create = stdin_y_n(&mut stdin, &mut input_buffer);
+                if create {
+                    let mut config = toml::Table::new();
+                    print!("Please enter the message board's address: ");
+                    let _ = stdout.flush();
+                    let mut server_address = String::new();
+                    let _ = stdin.read_line(&mut server_address);
+                    config.insert("address".to_string(), toml::Value::String(server_address.trim().to_string()));
+                    config.insert("user_id".to_string(), toml::Value::String("None".to_string()));
+
+                    let mut parent = real_rc_config.clone();
+                    parent.pop();
+                    let _ = std::fs::create_dir_all(parent);
+                    let _ = std::fs::write(real_rc_config, &config.to_string());
+                    rc_config_result = Ok(config);
+                } else {
+                    panic!("Cannot continue without a config file, terminating the client");
+                }
+            }
+            _ => panic!("terminating due to non-specifc config file read error: {}", e.kind())
+        }
+    }
+    let rc_config = rc_config_result.unwrap();
+    let _ = Config::from_toml(&rc_config);
+}
+
+#[derive(Debug)]
+enum StateChange {
+    // Movements, if reasonable, move to the widget in the indicated dir (changing state as appropriate), if not, do nothing
+    MoveRight, 
+    MoveLeft,
+    MoveDown,
+    MoveUp,
+    // Global state changes, only larger things should need this
+    Push(ClientState),
+    Pop,
+    Swap(ClientState),
+    // The meaning of this is entirely dependent on the specific widget
+    Blank // means it was handled but no state change
+}
+
+trait InputWidget where for<'a> &'a Self: Widget {
+    fn handle_event(&mut self, event: Event) -> Option<StateChange>;
+    // these functions may not mean anything for some widgets
+    fn focus(&mut self) {}
+    fn unfocus(&mut self) {}
+
+    fn consume_child(&mut self, child: ClientState) -> Option<StateChange>;
+}
+
 fn extract_name(entry_id: u64, entry: &Entry) -> String {
     #[allow(unreachable_patterns)]
     match &entry.entry_data {
@@ -30,6 +148,32 @@ fn extract_name(entry_id: u64, entry: &Entry) -> String {
     }
 }
 
+macro_rules! left {
+    () => {KeyCode::Char('h') | KeyCode::Left};
+}
+macro_rules! down {
+    () => {KeyCode::Char('j') | KeyCode::Down};
+}
+macro_rules! up {
+    () => {KeyCode::Char('k') | KeyCode::Up};
+}
+macro_rules! right {
+    () => {KeyCode::Char('l') | KeyCode::Right};
+}
+
+macro_rules! pass_direction {
+    ($expr:expr) => {
+        match $expr {
+            left!() => {return Some(StateChange::MoveLeft)}
+            down!() => {return Some(StateChange::MoveDown)}
+            up!() => {return Some(StateChange::MoveUp)}
+            right!() => {return Some(StateChange::MoveRight)}
+            x => {x}
+        } 
+    };
+}
+
+#[derive(Debug)]
 struct PathManager {
     path: Vec<(u64, String)>
 }
@@ -45,9 +189,9 @@ impl PathManager {
         self.path.len() > 0
     }
 
-    fn peek(&self) -> &(u64, String) {
-        if self.path.len() == 0 {panic!("can't peek an uninitialized path")}
-        &self.path[self.path.len() -1]
+    fn peek(&self) -> Option<&(u64, String)> {
+        if self.path.len() == 0 {return None}
+        Some(&self.path[self.path.len() -1])
     }
 
     fn pop(&mut self) -> Option<(u64, String)> {
@@ -62,7 +206,7 @@ impl PathManager {
     fn push(&mut self, entry_id: u64, entry: &Entry) -> Result<(), DataError> {
         let HeaderData { version: _, parent_id, children_ids: _, author_id: _ } = &entry.header_data;
         if self.path.len() > 0 {
-            if *parent_id != self.peek().0 {return Err(DataError::NonChild)}
+            if *parent_id != self.peek().unwrap().0 {return Err(DataError::NonChild)}
         } else {
             if (*parent_id != ROOT_ID) | (entry_id != ROOT_ID) {return Err(DataError::MalformedRoot)}
         }
@@ -91,16 +235,31 @@ impl Widget for &PathManager {
     }
 }
 
-struct Selector<T> {
+#[derive(Debug)]
+struct ScrollContainer<T> {
     cursor_pos: Option<usize>,
     items: Vec<T>,
 }
 
-impl<T> Selector<T> {
+impl<T> ScrollContainer<T> {
     fn new(items: Vec<T>) -> Self {
         Self {
             cursor_pos: None,
             items
+        }
+    }
+
+    fn push(&mut self, item: T) {
+        self.items.push(item);
+    }
+
+    fn remove(&mut self) -> T {
+        if let Some(cursor_pos) = &mut self.cursor_pos {
+            let out = self.items.remove(*cursor_pos);
+            *cursor_pos -= 1;
+            out
+        } else {
+            panic!("Can't remove from an unselected ScrollContainer")
         }
     }
 
@@ -111,35 +270,6 @@ impl<T> Selector<T> {
         }
     }
 
-    fn down(&mut self) {
-        if let Some(cursor_pos) = &mut self.cursor_pos {
-            *cursor_pos += 1;
-            *cursor_pos %= self.items.len();
-        } else {
-            self.cursor_pos = Some(0);
-        }
-    }
-    
-    fn up(&mut self) {
-        if let Some(cursor_pos) = &mut self.cursor_pos {
-            *cursor_pos += self.items.len();
-            *cursor_pos -= 1;
-            *cursor_pos %= self.items.len();
-        } else {
-            self.cursor_pos = Some(0);
-        }
-    }
-
-    fn select(&mut self) {
-        if self.cursor_pos.is_none() {
-            self.cursor_pos = Some(0);
-        }
-    }
-
-    fn deselect(&mut self) {
-        self.cursor_pos = None;
-    }
-
     fn selection(&self) -> Option<(usize, &T)> {
         if let Some(cursor_pos) = self.cursor_pos {
             Some((cursor_pos, &self.items[cursor_pos]))
@@ -148,9 +278,25 @@ impl<T> Selector<T> {
         }
     }
 
-    fn base_render<'a, U: Into<Line<'a>>, F: Fn(&T) -> &str>(&self, area: Rect, buf: &mut Buffer, title: U, f: F) {
-        let block = Block::bordered()
+    // same as selection but it consumes the items (must be reset using `replace_items`) to return an owned item
+    fn consume_selection(&mut self) -> Option<(usize, T)> {
+        if let Some(cursor_pos) = self.cursor_pos {
+            self.items.truncate(cursor_pos + 1);
+            let item = self.items.pop().unwrap();
+            self.items.clear(); // for keeping the items consistent but not strictly necessary
+            Some((cursor_pos, item))
+        } else {
+            None
+        }
+    }
+
+    fn base_render<'a, U: Into<Line<'a>>, F: Fn(&T) -> String>(&self, area: Rect, buf: &mut Buffer, title: U, f: F) {
+        let mut block = Block::bordered()
             .title(title);
+
+        if let Some(_) = self.cursor_pos { // ie. is focused
+            block = block.border_style(Style::new().bold());
+        }
 
         let mut text = Text::default();
         for (idx, item) in self.items.iter().enumerate() {
@@ -165,22 +311,204 @@ impl<T> Selector<T> {
             .block(block)
             .render(area, buf);
     }
-}
 
-// for the navigator, its (entry_id, name)
-impl Widget for &Selector<(u64, String)> {
-    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {
-        self.base_render(area, buf, " Children ", |x| &x.1 as &str);
+    fn base_handle_event(&mut self, event: Event) -> Option<StateChange> {
+        if let Event::Key(key_event) = event {
+            if !key_event.is_press() {return None}
+            match key_event.code {
+                down!() => {
+                    if let Some(cursor_pos) = &mut self.cursor_pos {
+                        *cursor_pos += 1;
+                        *cursor_pos %= self.items.len();
+                    } else {
+                        self.cursor_pos = Some(0);
+                    }
+                    return Some(StateChange::Blank);
+                }
+                up!() => {
+                    if let Some(cursor_pos) = &mut self.cursor_pos {
+                        *cursor_pos += self.items.len();
+                        *cursor_pos -= 1;
+                        *cursor_pos %= self.items.len();
+                    } else {
+                        self.cursor_pos = Some(0);
+                    }
+                    return Some(StateChange::Blank);
+                }
+                
+                x => {
+                    let _ = pass_direction!(x);
+                }
+            }
+        }
+        None
+    }
+
+    fn focus(&mut self) {
+        if self.cursor_pos.is_none() {
+            self.cursor_pos = Some(0);
+        }    
+    }
+
+    fn unfocus(&mut self) {
+        self.cursor_pos = None;
     }
 }
 
-// for entry type selections
-impl Widget for &Selector<EntryVariant> {
-    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {
-        self.base_render(area, buf, " Entry Type Selection ", |x| (*x).as_string());
+#[derive(Debug)]
+struct Navigator(ScrollContainer<(u64, String)>);
+
+impl Navigator {
+    fn replace_items(&mut self, items: &[u64]) {
+        self.0.replace_items(items.iter().copied().map(|x| (x, format!("{:016X}", x))).collect())
     }
 }
 
+impl Widget for &Navigator {
+    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {
+        self.0.base_render(area, buf, " Children ", |x| x.1.clone());
+    }
+}
+
+impl InputWidget for Navigator {
+    fn handle_event(&mut self, event: Event) -> Option<StateChange> {
+        if let Some(event) = self.0.base_handle_event(event.clone()) {
+            return Some(event)
+        } else {
+            if let Event::Key(key_event) = event {
+                if !key_event.is_press() {return None}
+                match key_event.code {
+                    KeyCode::Enter => {
+                        return Some(StateChange::Pop)
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+    }
+
+    fn focus(&mut self) {self.0.focus();}
+    fn unfocus(&mut self) {self.0.unfocus();}
+
+    fn consume_child(&mut self, child: ClientState) -> Option<StateChange> {
+        if let ClientState::Blank | ClientState::Error(_) = child {} else {
+            eprintln!("unexpected child of Naviagator")
+        }
+        None
+    }
+}
+
+#[derive(Debug)]
+struct EntryVariantSelector(ScrollContainer<EntryVariant>);
+
+impl EntryVariantSelector {
+    fn new() -> Self {
+        Self(ScrollContainer::new(Vec::from(ENTRY_VARIANTS)))
+    }
+}
+
+impl Widget for &EntryVariantSelector {
+    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {
+        self.0.base_render(area, buf, " Entry Type Selection ", |x| String::from((*x).as_string()));
+    }
+}
+
+impl InputWidget for EntryVariantSelector {
+    fn handle_event(&mut self, event: Event) -> Option<StateChange> {
+        if let Some(event) = self.0.base_handle_event(event.clone()) {
+            return Some(event)
+        } else {
+            if let Event::Key(key_event) = event {
+                if !key_event.is_press() {return None}
+                match key_event.code {
+                    KeyCode::Enter => {
+                        return Some(StateChange::Pop)
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+    }
+
+    fn focus(&mut self) {self.0.focus();}
+    fn unfocus(&mut self) {self.0.unfocus();}
+
+    fn consume_child(&mut self, child: ClientState) -> Option<StateChange> {
+        if let ClientState::Blank | ClientState::Error(_) = child {} else {
+            eprintln!("unexpected child of EntryVariantSelector")
+        }
+        None
+    }
+}
+
+#[derive(Debug)]
+struct IdList {
+    container: ScrollContainer<u64>,
+}
+
+impl IdList {
+    fn new(ids: Vec<u64>) -> Self {
+        Self {
+            container: ScrollContainer::new(ids),
+        }
+    }
+}
+
+impl Widget for &IdList {
+    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {
+        self.container.base_render(area, buf, " id list (temp name) ", |x| format!("{:016X}", x));
+    }
+}
+
+impl InputWidget for IdList {
+    fn handle_event(&mut self, event: Event) -> Option<StateChange> {
+        if let Some(event) = self.container.base_handle_event(event.clone()) {
+            return Some(event)
+        } else {
+            if let Event::Key(key_event) = event {
+                if !key_event.is_press() {return None}
+                match key_event.code {
+                    KeyCode::Char('w') => {
+                        return Some(StateChange::Push(ClientState::TextEntry(TextEntry::new(16))));
+                    }
+                    KeyCode::Char('d') | KeyCode::Backspace => {
+                        self.container.remove();
+                        return Some(StateChange::Blank);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    fn focus(&mut self) {
+        self.container.focus();
+    }
+    fn unfocus(&mut self) {
+        self.container.unfocus();
+        //self.id_entry.unfocus();
+    }
+
+    fn consume_child(&mut self, child: ClientState) -> Option<StateChange> {
+        match child {
+            ClientState::TextEntry(text_entry) => {
+                let Ok(new_id) = u64::from_str_radix(&text_entry.text.iter().collect::<String>(), 16) else {
+                    return Some(StateChange::Push(ClientState::Error(vec![internal_error!()])));
+                };
+                if !self.container.items.contains(&new_id) {self.container.push(new_id)}
+                return Some(StateChange::Blank);
+            }
+            ClientState::Blank | ClientState::Error(_) => {}
+            _ => {eprintln!("unexpected child of Naviagator")}
+        }
+        None
+    }
+}
+
+#[derive(Debug)]
 struct TextEntry {
     text: Vec<char>,
     cursor_pos: usize,
@@ -190,26 +518,6 @@ struct TextEntry {
 impl TextEntry {
     fn new(size: usize) -> Self {
         Self { text: Vec::new(), cursor_pos: 0, max_size: size }
-    }
-
-    fn handle_input(&mut self, key_event: KeyEvent) -> bool {
-        match key_event.code {
-            KeyCode::Backspace => {
-                if self.cursor_pos > 0 {self.cursor_pos -= 1; self.text.remove(self.cursor_pos);}
-            }
-            KeyCode::Delete => {
-                if self.cursor_pos < self.text.len() {self.text.remove(self.cursor_pos);}
-            }
-            KeyCode::Enter => {return true;}
-            KeyCode::Char(c) => {
-                if self.text.len() < self.max_size {
-                    self.text.insert(self.cursor_pos, c);
-                    self.cursor_pos += 1;
-                }
-            },
-            _ => {}
-        }
-        false
     }
 }
 
@@ -232,6 +540,47 @@ impl Widget for &TextEntry {
     }
 }
 
+impl InputWidget for TextEntry {
+    fn handle_event(&mut self, event: Event) -> Option<StateChange> {
+        let mut matched = true;
+        if let Event::Key(key_event) = event {
+            if !event.is_key_press() {return None}
+            match key_event.code {
+                KeyCode::Backspace => {
+                    if self.cursor_pos > 0 {self.cursor_pos -= 1; self.text.remove(self.cursor_pos);}
+                }
+                KeyCode::Delete => {
+                    if self.cursor_pos < self.text.len() {self.text.remove(self.cursor_pos);}
+                }
+                KeyCode::Enter => {return Some(StateChange::Pop)}
+                KeyCode::Char(c) => {
+                    if self.text.len() < self.max_size {
+                        self.text.insert(self.cursor_pos, c);
+                        self.cursor_pos += 1;
+                    }
+                },
+                x => {
+                    let _ = pass_direction!(x);
+                    matched = false;
+                }
+            }
+        }
+        if matched {
+            Some(StateChange::Blank)
+        } else {
+            None
+        }
+    }
+
+    fn consume_child(&mut self, child: ClientState) -> Option<StateChange> {
+        if let ClientState::Blank | ClientState::Error(_) = child {} else {
+            eprintln!("unexpected child of EntryVariantSelector")
+        }
+        None
+    }
+}
+
+#[derive(Debug)]
 struct EntryViewer {
     entry: Option<Entry>,
     has_mutated: bool,
@@ -294,58 +643,6 @@ impl EntryViewer {
         if let Some(_) = self.entry {self.has_mutated |= true;}
         &mut self.entry
     }
-
-    // true if would've moved past the edge 
-    fn up(&mut self) -> bool {
-        if self.y_select == 0 {
-            true
-        } else {
-            self.y_select -= 1;
-            false
-        }
-    }
-
-    fn down(&mut self) -> bool {
-        self.y_select += 1;
-        if self.y_select >= self.y_size {
-            self.y_select = self.y_size -1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn left(&mut self) -> bool {
-        if self.x_select == 0 {
-            true
-        } else {
-            self.x_select -= 1;
-            false
-        }
-    }
-
-    fn right(&mut self) -> bool {
-        self.x_select += 1;
-        if self.x_select >= self.x_size {
-            self.x_select = self.x_size -1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn enter(&mut self) -> Option<ClientState> {
-        if let Some(entry) = &self.entry {
-            match entry.entry_data {
-                EntryData::Message { .. } => None,
-                EntryData::AccessGroup { name: _, write_perms: _, read_perms: _ } => {
-                    Some(ClientState::AccessGroupIdEntry { text_entry: TextEntry::new(16), idx: self.x_select })
-                }
-            }
-        } else {
-            None
-        }
-    }
 }
 
 impl Widget for &EntryViewer {
@@ -373,7 +670,7 @@ impl Widget for &EntryViewer {
                         let write_read_layout = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).split(inner_area);
                         let mut x = 0;
                         for ((perm_set, mut perm_name ), area) in [write_perms, read_perms].iter().copied().zip(write_read_titles).zip(write_read_layout.iter().copied()) {
-                            let mut block = Block::bordered();
+                            let block = Block::bordered();
                             let perm_set_area = block.inner(area);
                             perm_name.push_str(&perm_set.get_default_base().to_string());
                             perm_name.push_str(") ");
@@ -444,120 +741,421 @@ impl Widget for &EntryViewer {
     }
 }
 
-enum ViewerState {
-    Content,
-    Navigate,
-}
-
-enum ClientState {
-    Viewer(ViewerState),
-    WriteVarientSelection(Selector<EntryVariant>),
-    AccessGroupIdEntry{text_entry: TextEntry, idx: usize},
-    Blank,
-    Error(Vec<DataError>),
-}
-
-struct Client {
-    terminal: Option<ratatui::DefaultTerminal>,
-
-    state: Vec<ClientState>,
-    path: PathManager,
-    navigator: Selector<(u64, String)>,
-    viewer: EntryViewer,
-
-    stream: TcpStream,
-    user_id: Option<u64>,
-
-    exit: bool,
-}
-
-impl Client {
-    fn new() -> Result<Self, DataError> {
-        let user_home = std::env::home_dir().unwrap();
-        let mut real_rc_config = user_home.clone();
-        real_rc_config.push(RC_FILE);
-        let mut stdin = std::io::stdin();
-        let mut stdout = std::io::stdout();
-        let mut input_buffer = String::new();
-        let mut rc_config_result = std::fs::read_to_string(&real_rc_config).map(|str| str.parse::<toml::Table>().expect("The Client Rc was misformatted"));
-        if let Err(ref e) = rc_config_result {
-            match e.kind() {
-                std::io::ErrorKind::NotFound => {
-                    print!("Config file does not exist, create a new one? (y/n): ");
-                    let _ = stdout.flush();
-                    input_buffer.clear();
-                    let create = stdin_y_n(&mut stdin, &mut input_buffer);
-                    if create {
-                        let mut config = toml::Table::new();
-                        print!("Please enter the message board's address: ");
-                        let _ = stdout.flush();
-                        let mut server_address = String::new();
-                        let _ = stdin.read_line(&mut server_address);
-                        config.insert("address".to_string(), toml::Value::String(server_address.trim().to_string()));
-                        config.insert("user_id".to_string(), toml::Value::String("None".to_string()));
-
-                        let mut parent = real_rc_config.clone();
-                        parent.pop();
-                        let _ = std::fs::create_dir_all(parent);
-                        let _ = std::fs::write(real_rc_config, &config.to_string());
-                        rc_config_result = Ok(config);
-                    } else {
-                        panic!("Cannot continue without a config file, terminating the client");
+impl InputWidget for EntryViewer {
+    fn handle_event(&mut self, event: Event) -> Option<StateChange> {
+        if let Some(entry) = &mut self.entry {
+            //universal stuff
+            if let Event::Key(key_event) = event.clone() {
+                let mut matched = true;
+                match key_event.code {
+                    left!() => {
+                        if self.x_select == 0 {
+                            return Some(StateChange::MoveLeft)
+                        } else {
+                            self.x_select -= 1;
+                        }
+                    }
+                    up!() => {
+                        if self.y_select == 0 {
+                            return Some(StateChange::MoveUp)
+                        } else {
+                            self.y_select -= 1;
+                        }
+                    }
+                    down!() => {
+                        self.y_select += 1;
+                        if self.y_select >= self.y_size {
+                            self.y_select = self.y_size -1;
+                            return Some(StateChange::MoveDown)
+                        }
+                    }
+                    right!() => {
+                        self.x_select += 1;
+                        if self.x_select >= self.x_size {
+                            self.x_select = self.x_size -1;
+                            return Some(StateChange::MoveRight)
+                        }
+                    }
+                    _ => {matched = false}
+                }
+                if matched {return Some(StateChange::Blank)}
+            }
+            match &mut entry.entry_data {
+                EntryData::Message { .. } => {}
+                EntryData::AccessGroup { write_perms, read_perms, .. } => {
+                    if let Event::Key(key_event) = event {
+                        match key_event.code {
+                            KeyCode::Enter => {
+                                let mut id_lists = Vec::new();
+                                for perm_set in [write_perms, read_perms] {
+                                    match perm_set {
+                                        DefaultedIdSet::Inherit { whitelist_ids, blacklist_ids } => {
+                                            id_lists.push(whitelist_ids);
+                                            id_lists.push(blacklist_ids);
+                                        }
+                                        DefaultedIdSet::Black { whitelist_ids } => {
+                                            id_lists.push(whitelist_ids);
+                                        }
+                                        DefaultedIdSet::White { blacklist_ids } => {
+                                            id_lists.push(blacklist_ids);
+                                        }
+                                    }
+                                }
+                                return Some(
+                                    StateChange::Push(
+                                        ClientState::AccessGroupIdList(
+                                            AccessGroupIdList { 
+                                                id_list: IdList::new(id_lists[self.x_select].clone()), 
+                                                idx: self.x_select 
+                                            }
+                                        )
+                                    )
+                                )
+                            }
+                            _ => {}
+                        }
                     }
                 }
-                _ => panic!("terminating due to non-specifc config file read error: {}", e.kind())
             }
         }
-        let rc_config = rc_config_result.unwrap();
-        let user_id_val = &rc_config["user_id"];
-        let user_id = match user_id_val {
-            toml::Value::Integer(id) => Some(*id as u64), //scuff
-            toml::Value::String(str) if str == "None" => None,
-            _ => {panic!("The client RC file was misformatted")}
-        };
-        let toml::Value::String(server_address) = &rc_config["address"] else {panic!("The client RC file was misformatted")};
+        None
+    }
 
+    fn consume_child(&mut self, child: ClientState) -> Option<StateChange> {
+        if let Some(entry) = &mut self.entry {
+            match (&mut entry.entry_data, child) {
+                (EntryData::AccessGroup { name: _, write_perms, read_perms }, ClientState::AccessGroupIdList(access_group_list)) => {
+                    let mut id_lists = Vec::new();
+                    for perm_set in [write_perms, read_perms] {
+                        match perm_set {
+                            DefaultedIdSet::Inherit { whitelist_ids, blacklist_ids } => {
+                                id_lists.push(whitelist_ids);
+                                id_lists.push(blacklist_ids);
+                            }
+                            DefaultedIdSet::Black { whitelist_ids } => {
+                                id_lists.push(whitelist_ids);
+                            }
+                            DefaultedIdSet::White { blacklist_ids } => {
+                                id_lists.push(blacklist_ids);
+                            }
+                        }
+                    }
+                    if id_lists[access_group_list.idx] != &access_group_list.id_list.container.items {
+                        self.has_mutated = true;
+                        std::mem::replace(id_lists[access_group_list.idx],access_group_list.id_list.container.items);
+                    }
+                }
+                (_, ClientState::Blank | ClientState::Error(_)) => {}
+                _ => eprintln!("Unexpected child of EntryViewer"),
+            }
+        } else {
+            if let ClientState::Blank | ClientState::Error(_) = child {} else {
+                eprintln!("Unexpected child of EntryViewer")
+            }
+        }
+        None
+    }
+}
+
+
+#[derive(Debug)]
+enum TreeViewerState {
+    Content,
+    Navigate,
+    Unfocused
+}
+
+#[derive(Debug)]
+struct EntryTreeViewer {
+    path: PathManager,
+    navigator: Navigator,
+    viewer: EntryViewer,
+    state: TreeViewerState,
+    awaited_child_parent: Option<TreeViewerState>, //janked type
+    
+    board: Rc<RefCell<MessageBoardConnection>>,
+    terminal: Rc<RefCell<Terminal>>,
+}
+
+impl EntryTreeViewer {
+    fn new(board: Rc<RefCell<MessageBoardConnection>>, terminal: Rc<RefCell<Terminal>>) -> Result<Self, DataError> {
+        let mut viewer = Self {
+            path: PathManager::new(),
+            navigator: Navigator (ScrollContainer::new(Vec::new())),
+            viewer: EntryViewer::new(),
+            state: TreeViewerState::Unfocused,
+            awaited_child_parent: None,
+
+            board,
+            terminal,
+        };
+
+        viewer.push_active_entry(ROOT_ID); // FIXME: scuff, really there is no "last" entry_id
+
+        Ok(viewer)
+    }
+
+    fn reload(&mut self) -> Result<(), DataError> {
+        let new_id = self.path.peek().unwrap().0;
+        self.swap_active_entry(new_id)?;
+        if new_id == ROOT_ID {self.path.pop();} //scuff
+        Ok(())
+    }
+
+    fn swap_active_entry(&mut self, new_entry_id: u64) -> Result<(), DataError> {
+        let mut board = self.board.borrow_mut();
+        let new_entry = board.get_entry(new_entry_id)?;
+        self.navigator.replace_items(&new_entry.header_data.children_ids); // temporary
+        let old_entry_id = self.path.peek().map(|x| x.0); //jank
+        self.path.pop();
+        self.path.push(new_entry_id, &new_entry);
+        if let (Some(old_entry), Some(old_entry_id)) = (self.viewer.add_entry(new_entry), old_entry_id) {
+            board.edit_entry(old_entry_id, old_entry)?;
+        }
+        Ok(())
+    }
+
+    fn push_active_entry(&mut self, new_entry_id: u64) -> Result<(), DataError> {
+        let mut board = self.board.borrow_mut();
+        let new_entry = board.get_entry(new_entry_id)?;
+        self.navigator.replace_items(&new_entry.header_data.children_ids); // temporary
+        let old_entry_id = self.path.peek().map(|x| x.0); //jank
+        self.path.push(new_entry_id, &new_entry);
+        if let (Some(old_entry), Some(old_entry_id)) = (self.viewer.add_entry(new_entry), old_entry_id) {
+            board.edit_entry(old_entry_id, old_entry)?;
+        }
+        Ok(())
+    }
+
+    fn pop_active_entry(&mut self) -> Result<(), DataError> {
+        self.path.pop();
+        self.reload()
+    }
+
+    fn set_state(&mut self, state: TreeViewerState) {
+        match state {
+            TreeViewerState::Content => {
+                self.viewer.focus();
+                self.navigator.unfocus();
+            }
+            TreeViewerState::Navigate => {
+                self.viewer.unfocus();
+                self.navigator.focus();
+            }
+            TreeViewerState::Unfocused => {
+                self.viewer.unfocus();
+                self.navigator.unfocus();
+            }
+        }
+        self.state = state;
+    }
+}
+
+impl Drop for EntryTreeViewer {
+    fn drop(&mut self) {
+        if self.viewer.has_mutated {
+            if let Some(entry) = self.viewer.take_entry() {
+                if let Some((id, _)) = self.path.peek() {
+                    let _ = self.board.borrow_mut().edit_entry(*id, entry);
+                }
+            }
+        }
+    }
+}
+
+impl Widget for &EntryTreeViewer {
+    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {
+        let mut layout = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).split(area);
+        let path_area = layout[0];
+        layout = Layout::horizontal([Constraint::Fill(4), Constraint::Fill(1)]).split(layout[1]);
+        let content_area = layout[0];
+        let navigator_area = layout[1];
+
+        Clear.render(area, buf);
+        self.path.render(path_area, buf);
+        self.navigator.render(navigator_area, buf);
+        self.viewer.render(content_area, buf);
+    }
+}
+
+impl InputWidget for EntryTreeViewer {
+    fn handle_event(&mut self, event: Event) -> Option<StateChange> {
+        let mut matched = false;
+        if let Event::Key(key_event) = event.clone() {
+            matched = true;
+            self.awaited_child_parent = Some(TreeViewerState::Unfocused);            
+            match key_event.code {
+                KeyCode::Char('h') if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
+                    if let Err(e) = self.pop_active_entry() {
+                        return Some(StateChange::Push(ClientState::Error(vec![e])));
+                    }
+                }
+                KeyCode::Char('w') => {
+                    return Some(StateChange::Push(ClientState::WriteVarientSelection(EntryVariantSelector::new())))
+                }
+                _ => matched = false
+            }
+        }
+        if matched {return Some(StateChange::Blank)}
+        match self.state {
+            TreeViewerState::Content => {
+                self.awaited_child_parent = Some(TreeViewerState::Content);
+                if let Some(state_change) = self.viewer.handle_event(event) {
+                    match state_change {
+                        StateChange::MoveRight => {self.set_state(TreeViewerState::Navigate);},
+                        other => return Some(other)
+                    }
+                }
+            },
+            TreeViewerState::Navigate => {
+                self.awaited_child_parent = Some(TreeViewerState::Navigate);
+                if let Some(state_change) = self.navigator.handle_event(event) {
+                    match state_change {
+                        StateChange::Pop => {
+                            let new_entry_id = self.navigator.0.selection().unwrap().1.0;
+                            self.push_active_entry(new_entry_id);
+                            return Some(StateChange::Blank);
+                        },
+                        StateChange::MoveLeft => {self.set_state(TreeViewerState::Content);},
+                        other => return Some(other)
+                    }
+                }
+            },
+            TreeViewerState::Unfocused => panic!("EntryTreeViewer shouldn't handle events while unfocused")
+        }
+        self.awaited_child_parent = None;
+        None
+    }
+
+    fn focus(&mut self) {
+        if let TreeViewerState::Unfocused = self.state {self.state = TreeViewerState::Content}
+    }
+
+    fn unfocus(&mut self) {
+        self.state = TreeViewerState::Unfocused;
+    }
+
+    fn consume_child(&mut self, child: ClientState) -> Option<StateChange> {
+        let Some(child_parent) = &self.awaited_child_parent else {
+            eprintln!("Unexpected child of EntryTreeViewer");
+            return None;
+        };
+        match child_parent {
+            TreeViewerState::Unfocused => {
+                let mut matched = true;
+                match child {
+                    ClientState::WriteVarientSelection(selector) => {
+                        let header = HeaderData { 
+                            version: ENTRY_FILE_VERSION, 
+                            parent_id: self.path.peek().unwrap().0, 
+                            children_ids: Vec::new(), 
+                            author_id: self.board.borrow().user_id.unwrap(), 
+                        };
+                        let entry = match selector.0.selection().unwrap().1 {
+                            EntryVariant::Message => {
+                                // boot up vim for the text editor
+                                let mut path = std::env::temp_dir();
+                                path.push("MessageBoardEntryDraft.txt");
+                                let Ok(_) = std::fs::File::create(&path) else {return Some(StateChange::Push(ClientState::Error(vec![internal_error!()])))};
+                                if let Err(e) = self.terminal.borrow_mut().pause(|| {
+                                    ratatui::restore();
+                                    let Ok(mut child) = std::process::Command::new("vim")
+                                        .args([&path])
+                                        .spawn() else {return Err(internal_error!())};
+                                    let Ok(_) = child.wait() else {return Err(internal_error!())};
+                                    Ok(())
+                                }) {
+                                    return Some(StateChange::Push(ClientState::Error(vec![e])))
+                                };
+                                let Ok(message) = std::fs::read_to_string(&path) else {return Some(StateChange::Push(ClientState::Error(vec![internal_error!()])))};
+                                let _ = std::fs::remove_file(&path);
+                                Some(Entry {
+                                    header_data: header,
+                                    entry_data: EntryData::Message { 
+                                        timestamp: std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap().as_secs(), 
+                                        message
+                                    }
+                                })
+                            }
+                            EntryVariant::AccessGroup => {
+                                Some(Entry {
+                                    header_data: header,
+                                    entry_data: EntryData::AccessGroup { 
+                                        name: String::from("test"), 
+                                        write_perms: DefaultedIdSet::Inherit { whitelist_ids: Vec::new(), blacklist_ids: Vec::new() }, 
+                                        read_perms: DefaultedIdSet::Inherit { whitelist_ids: Vec::new(), blacklist_ids: Vec::new() },
+                                    }
+                                })
+                            }
+                            _ => {
+                                None
+                            }
+                        };
+                        if let Some(entry) = entry {
+                            let result = self.board.borrow_mut().write_entry(entry);
+                            if let Err(e) = result {
+                                return Some(StateChange::Push(ClientState::Error(vec![e])));
+                            }
+                        }
+                    }
+                    ClientState::Blank | ClientState::Error(_) => {}
+                    _ => matched = false,
+                }
+                if matched {Some(StateChange::Blank)} else {None}
+            }
+            TreeViewerState::Content => self.viewer.consume_child(child),
+            TreeViewerState::Navigate => self.navigator.consume_child(child),
+        }
+    }
+}
+
+
+#[derive(Debug)]
+struct AccessGroupIdList {
+    id_list: IdList, 
+    idx: usize,
+}
+
+impl Widget for &AccessGroupIdList {
+    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {self.id_list.render(area, buf)}
+}
+
+impl InputWidget for AccessGroupIdList {
+    fn handle_event(&mut self, event: Event) -> Option<StateChange> {self.id_list.handle_event(event)}
+    fn focus(&mut self) {self.id_list.focus();}
+    fn unfocus(&mut self) {self.id_list.unfocus();}
+    fn consume_child(&mut self, child: ClientState) -> Option<StateChange> {self.id_list.consume_child(child)}
+}
+
+
+#[derive(Debug)]
+struct MessageBoardConnection {
+    stream: TcpStream,
+    user_id: Option<u64>,
+}
+
+impl MessageBoardConnection {
+    fn new(config: &Config) -> Self {
         let mut connected_stream = None;
         while connected_stream.is_none() {
-            let stream = TcpStream::connect((server_address as &str, PORT));
+            let stream = TcpStream::connect((&config.server_address as &str, PORT));
             if let Ok(stream) = stream {
                 connected_stream = Some(stream);
             } else if let Err(e) = stream {
-                println!("Connection failed: {}", e);
+                eprintln!("Connection failed: {}", e);
             }
         }
-
-        let terminal = ratatui::init();
-        let mut client = Self { 
-            terminal: Some(terminal),
-
-            state: vec![ClientState::Viewer(ViewerState::Content)],
-            path: PathManager::new(),
-            navigator: Selector::new(Vec::new()),
-            viewer: EntryViewer::new(),
-
-            stream: connected_stream.unwrap(),
-            user_id,
-            exit: false,
-        };
         
-        let _ = client.create_user(); // FIXME: should notify in some way if a new one was minted
-        let entry = client.get_entry(ROOT_ID)?;
-        client.path.push(ROOT_ID, &entry)?;
-        client.set_active_entry(0, entry); // FIXME: scuff, really there is no "last" entry_id
-
-        Ok(client)
-    }
-
-    fn edit_config<F: FnOnce(&mut toml::Table)>(&mut self, f: F) {
-        let user_home = std::env::home_dir().unwrap();
-        let mut real_rc_config = user_home.clone();
-        real_rc_config.push(RC_FILE);
-
-        let mut config = std::fs::read_to_string(&real_rc_config)
-            .map(|str| str.parse::<toml::Table>().expect("The Server Rc was misformatted")).unwrap();
-        f(&mut config);
-        let _ = std::fs::write(&real_rc_config, &config.to_string());
+        let mut board = Self { stream: connected_stream.unwrap(), user_id: config.user_id };
+        if let Some(user_id) = board.user_id {
+            if let Err(e) = board.get_user(user_id) {
+                eprintln!("User Id not found on server ({:?})", e);
+                eprintln!("If this is correct, set it to \"None\"");
+            }
+        } else {
+            let _ = board.create_user(); // FIXME: should notify in some way if a new one was minted
+        }
+        board
     }
 
     fn send_request(&mut self, request: BoardRequest) -> Result<MaybeBoardResponse, DataError> {
@@ -593,12 +1191,6 @@ impl Client {
         Ok(())
     }
 
-    fn set_active_entry(&mut self, last_entry_id: u64, entry: Entry) {
-        self.navigator.replace_items(entry.header_data.children_ids.iter().copied().map(|x| (x, format!("{:016X}", x))).collect()); // temporary
-        if let Some(old_entry) = self.viewer.add_entry(entry) {
-            self.edit_entry(last_entry_id, old_entry);
-        }
-    }
 
     fn get_user(&mut self, user_id: u64) -> Result<UserData, DataError> {
         let request = BoardRequest::GetUser { user_id };
@@ -608,29 +1200,214 @@ impl Client {
     }
 
     fn create_user(&mut self) -> Result<bool, DataError> {
-        if let Some(_) = self.user_id {return Ok(false)}
+        //if let Some(_) = self.user_id {return Ok(false)}
         let request = BoardRequest::AddUser;
         let response = self.send_request(request)??;
         let BoardResponse::AddUser(user_id) = response else {return Err(internal_error!())};
         self.user_id = Some(user_id);
-        self.edit_config(|config| config["user_id"] = toml::Value::Integer(user_id as i64));
+        edit_config(|config| config.user_id = Some(user_id));
         Ok(true)
+    }
+}
+
+#[derive(Debug)]
+struct Terminal {
+    term: Option<ratatui::DefaultTerminal>,
+}
+
+impl Terminal {
+    fn new() -> Self {
+        Self {
+            term: Some(ratatui::init())
+        }
+    }
+
+    fn pause<F: FnOnce() -> O, O>(&mut self, f: F) -> O {
+        if self.term.is_none() {eprintln!("Terminal invariant broken: accessible while self.term = None")};
+        ratatui::restore();
+        self.term = None;
+        let out = f();
+        self.term = Some(ratatui::init());
+        out
+    }
+}
+
+impl std::ops::Deref for Terminal {
+    type Target = ratatui::DefaultTerminal;
+
+    fn deref(&self) -> &Self::Target {
+        self.term.as_ref().expect("Terminal invariant broken: accessible while self.term = None")
+    }
+}
+
+impl std::ops::DerefMut for Terminal {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.term.as_mut().expect("Terminal invariant broken: accessible while self.term = None")
+    }
+}
+
+
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        if self.term.is_some() {ratatui::restore();}
+    }
+}
+
+#[derive(Debug)]
+enum ClientState {
+    Viewer(EntryTreeViewer),
+    WriteVarientSelection(EntryVariantSelector),
+    TextEntry(TextEntry),
+    AccessGroupIdList(AccessGroupIdList),
+    Blank,
+    Error(Vec<DataError>),
+}
+
+impl Widget for &ClientState {
+    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {
+        match self {
+            ClientState::Viewer(viewer) => viewer.render(area, buf),
+            ClientState::WriteVarientSelection(selector) => selector.render(area, buf),
+            ClientState::TextEntry(entry) => entry.render(area, buf),
+            ClientState::AccessGroupIdList(id_list) => id_list.render(area, buf),
+            ClientState::Error(errors) => {
+                let mut layout = Layout::horizontal([Constraint::Fill(1), Constraint::Percentage(50), Constraint::Fill(1)]).split(area);
+                layout = Layout::vertical([Constraint::Fill(1), Constraint::Percentage(50), Constraint::Fill(1)]).split(layout[1]);
+                let error_popup_area = layout[1];
+
+                let block = Block::bordered().title(" Error(s) ");
+
+                let mut text = Text::default();
+                for error in errors {
+                    let line = Line::from(format!("{:?}", error));
+                    text.push_line(line);
+                }
+
+                Clear.render(error_popup_area, buf);
+                Paragraph::new(text).block(block).render(error_popup_area, buf);
+            },
+            ClientState::Blank => eprintln!("attempted to display a Blank ClientState, this should never be displayed during proper functioning"),
+        }
+    }
+}
+
+impl InputWidget for ClientState {
+    fn handle_event(&mut self, event: Event) -> Option<StateChange> {
+        match self {
+            ClientState::Viewer(viewer) => viewer.handle_event(event),
+            ClientState::WriteVarientSelection(selector) => selector.handle_event(event),
+            ClientState::TextEntry(entry) => entry.handle_event(event),
+            ClientState::AccessGroupIdList(id_list) => id_list.handle_event(event),
+            ClientState::Blank | ClientState::Error(_) => {Some(StateChange::Pop)},
+        }
+    }
+
+    fn focus(&mut self) {
+        match self {
+            ClientState::Viewer(viewer) => viewer.focus(),
+            ClientState::WriteVarientSelection(selector) => selector.focus(),
+            ClientState::TextEntry(entry) => entry.focus(),
+            ClientState::AccessGroupIdList(id_list) => id_list.focus(),
+            ClientState::Blank | ClientState::Error(_) => {},
+        }
+    }
+    fn unfocus(&mut self) {
+        match self {
+            ClientState::Viewer(viewer) => viewer.unfocus(),
+            ClientState::WriteVarientSelection(selector) => selector.unfocus(),
+            ClientState::TextEntry(entry) => entry.unfocus(),
+            ClientState::AccessGroupIdList(id_list) => id_list.unfocus(),
+            ClientState::Blank | ClientState::Error(_) => {},
+        }
+    }
+
+    fn consume_child(&mut self, child: ClientState) -> Option<StateChange> {
+        match self {
+            ClientState::Viewer(viewer) => viewer.consume_child(child),
+            ClientState::WriteVarientSelection(selector) => selector.consume_child(child),
+            ClientState::TextEntry(entry) => entry.consume_child(child),
+            ClientState::AccessGroupIdList(id_list) => id_list.consume_child(child),
+            ClientState::Blank | ClientState::Error(_) => {Some(StateChange::Pop)},
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Client {
+    terminal: Rc<RefCell<Terminal>>,
+    board: Rc<RefCell<MessageBoardConnection>>,
+    
+    state: Vec<ClientState>,
+    exit: bool,
+}
+
+impl Client {
+    fn new() -> Result<Self, DataError> {
+        validate_config();
+        let config = get_config();
+
+        let board = Rc::new(RefCell::new(MessageBoardConnection::new(&config)));
+        let terminal = Rc::new(RefCell::new(Terminal::new()));
+        
+        let mut client = Self { 
+            terminal: terminal.clone(),
+            board: board.clone(),
+            
+            state: Vec::new(),
+            exit: false,
+        };
+        client.handle_state_change(Some(StateChange::Push(ClientState::Viewer(EntryTreeViewer::new(board, terminal)?))));
+        Ok(client)
+    }
+
+    fn handle_state_change(&mut self, change: Option<StateChange>) {
+        eprintln!("{:?}", change);
+        if let Some(change) = change {
+            match change {
+                StateChange::Push(mut new_state) => {
+                    if self.state.len() > 0 {
+                        let state_end = self.state.len() -1;
+                        self.state[state_end].unfocus();
+                    }
+                    if let ClientState::Blank = new_state {return}
+                    new_state.focus();
+                    self.state.push(new_state);
+                }
+                StateChange::Pop => {
+                    let child_state = self.state.pop().expect("Shouldn't pop off a state when there are no states");
+                    if self.state.len() > 0 {
+                        let state_end = self.state.len() -1; // aside: lifetimes are cool but sometimes they are just feel dumb :(
+                        self.state[state_end].consume_child(child_state);
+                        self.state[state_end].focus();
+                    }
+                }
+                StateChange::Swap(new_state) => {
+                    if let ClientState::Blank = new_state {
+                        self.handle_state_change(Some(StateChange::Pop));
+                    } else {
+                        // NOTE: can't swap this out for the `handle_state_change` to avoid termination if only 1 state on the stack
+                        let child_state = self.state.pop().expect("Shouldn't pop off a state when there are no states");
+                        if self.state.len() > 0 {
+                            let state_end = self.state.len() -1; // aside: lifetimes are cool but sometimes they are just feel dumb :(
+                            self.state[state_end].consume_child(child_state);
+                            self.state[state_end].focus();
+                        }
+                        self.handle_state_change(Some(StateChange::Push(new_state)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if self.state.len() == 0 {self.exit = true; return}
     }
 
     fn mainloop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         while !self.exit {
-            // little scuffed
-            let mut term = self.terminal.take().unwrap();
-            term.draw(|frame| self.draw(frame))?;
-            self.terminal = Some(term);
+            self.terminal.borrow_mut().draw(|frame| self.draw(frame))?;
 
             self.handle_events()?;
         }
-        if self.viewer.has_mutated {
-            if let Some(entry) = self.viewer.take_entry() {
-                self.edit_entry(self.path.peek().0, entry);
-            }
-        }
+        
         Ok(())
     }
 
@@ -639,50 +1416,34 @@ impl Client {
     }
 
     fn handle_events(&mut self) -> std::io::Result<()> {
-        match event::read()? {
-            Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+        let event = event::read()?;
+        let mut matched = true;
+        if let Event::Key(key_event) = event.clone() {
+            if key_event.is_press() {
                 match key_event.code {
-                    KeyCode::Char('c') if key_event.modifiers == KeyModifiers::CONTROL => {
-                        self.exit = true;
-                    }
+                    KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => self.exit = true,
                     KeyCode::Esc => {
-                        if self.state.len() == 1 {
-                            self.exit = true;
-                        } else {
-                            self.state.pop();
-                        }
+                        self.handle_state_change(Some(StateChange::Pop));
                     }
-                    _ => {
-                        let old_top_state = self.state.pop().unwrap();
-                        let new_top_state = self.stated_handle_key_event(old_top_state, key_event);
-                        match &new_top_state {
-                            ClientState::Viewer(ViewerState::Content) => {
-                                self.navigator.deselect();
-                            }
-                            ClientState::Viewer(ViewerState::Navigate) => {
-                                self.navigator.select();
-                            }
-                            _ => {}
-                        }
-                        // mild jank
-                        if let ClientState::Blank = new_top_state {} else {
-                            self.state.push(new_top_state)
-                        }
-                    }
+                    _ => matched = false
                 }
             }
-            _ => {}
+        }
+        if !matched {
+            let end = self.state.len() -1;
+            let state_change = (&mut self.state[end]).handle_event(event);
+            self.handle_state_change(state_change);
         }
         Ok(())
     }
-
+    /*
     fn stated_handle_key_event(&mut self, state: ClientState, key_event: KeyEvent) -> ClientState {
         match state {
             ClientState::Viewer(ref viewer_state) => {
                 match (key_event.code, viewer_state) {
                     (KeyCode::Char('w'), _) => {
                         self.state.push(state);
-                        let mut selector = Selector::new(Vec::from(ENTRY_VARIANTS));
+                        let mut selector = ScrollContainer::new(Vec::from(ENTRY_VARIANTS));
                         selector.select();
                         return ClientState::WriteVarientSelection(selector);
                     }
@@ -705,28 +1466,28 @@ impl Client {
                         }
                     }
 
-                    (KeyCode::Char('l') | KeyCode::Right, ViewerState::Content) => {if self.viewer.right() {return ClientState::Viewer(ViewerState::Navigate)}}
-                    (KeyCode::Char('h') | KeyCode::Left, ViewerState::Content) => {self.viewer.left();}
-                    (KeyCode::Char('k') | KeyCode::Up, ViewerState::Content) => {self.viewer.up();}
-                    (KeyCode::Char('j') | KeyCode::Down, ViewerState::Content) => {self.viewer.down();}
-                    (KeyCode::Enter, ViewerState::Content) => {
+                    (right!(), TreeViewerState::Content) => {if self.viewer.right() {return ClientState::Viewer(TreeViewerState::Navigate)}}
+                    (left!(), TreeViewerState::Content) => {self.viewer.left();}
+                    (up!(), TreeViewerState::Content) => {self.viewer.up();}
+                    (down!(), TreeViewerState::Content) => {self.viewer.down();}
+                    (KeyCode::Enter, TreeViewerState::Content) => {
                         if let Some(new_state) = self.viewer.enter() {
                             self.state.push(state);
                             return new_state;
                         }
                     }
 
-                    (KeyCode::Char('h') | KeyCode::Left, ViewerState::Navigate) => {return ClientState::Viewer(ViewerState::Content)}
-                    (KeyCode::Char('k') | KeyCode::Up, ViewerState::Navigate) => {self.navigator.up();}
-                    (KeyCode::Char('j') | KeyCode::Down, ViewerState::Navigate) => {self.navigator.down();}
-                    (KeyCode::Enter, ViewerState::Navigate) => 'block: {
+                    (left!(), TreeViewerState::Navigate) => {return ClientState::Viewer(TreeViewerState::Content)}
+                    (up!(), TreeViewerState::Navigate) => {self.navigator.up();}
+                    (down!(), TreeViewerState::Navigate) => {self.navigator.down();}
+                    (KeyCode::Enter, TreeViewerState::Navigate) => 'block: {
                         let last_entry_id = self.path.peek().0;
                         let Some((_, (entry_id, _))) = self.navigator.selection() else {self.navigator.select(); break 'block};
                         let entry_id = *entry_id;
                         let Ok(entry) = self.get_entry(entry_id) else {break 'block}; // needs a more proper error
                         self.path.push(entry_id, &entry).unwrap();
                         self.set_active_entry(last_entry_id, entry);
-                        return ClientState::Viewer(ViewerState::Content);
+                        return ClientState::Viewer(TreeViewerState::Content);
                     }
                     _ => {}
                 }
@@ -734,8 +1495,8 @@ impl Client {
             }
             ClientState::WriteVarientSelection(mut selector) => {
                 match key_event.code {
-                    KeyCode::Char('k') | KeyCode::Up => {selector.up();}
-                    KeyCode::Char('j') | KeyCode::Down => {selector.down();}
+                    up!() => {selector.up();}
+                    down!() => {selector.down();}
                     KeyCode::Enter => 'block: {
                         let Some((_, variant)) = selector.selection() else {selector.select(); break 'block};
                         let entry = match variant {
@@ -835,67 +1596,19 @@ impl Client {
             }
         }
     }
+    */
 }
 
 impl Widget for &Client {
     fn render(self, area: Rect, buf: &mut Buffer)where Self: Sized {
         let layout = Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).split(area);
         {
-            let mut title_line = Line::from(" Message Board - User: ");
-            title_line.push_span(format!("{:016X}", self.user_id.unwrap()));
-            title_line.push_span(" ");
+            let title_line = Line::from(" Message Board - by EsotericPyramid ");
             title_line.centered().render(layout[0], buf);
         }
         let area = layout[1];
         for sub_state in &self.state {
-            match sub_state {
-                ClientState::Viewer(_) => {
-                    let mut layout = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).split(area);
-                    let path_area = layout[0];
-                    layout = Layout::horizontal([Constraint::Fill(4), Constraint::Fill(1)]).split(layout[1]);
-                    let content_area = layout[0];
-                    let navigator_area = layout[1];
-
-                    Clear.render(area, buf);
-                    self.path.render(path_area, buf);
-                    self.navigator.render(navigator_area, buf);
-                    self.viewer.render(content_area, buf);
-                }
-                ClientState::WriteVarientSelection(selector) => {
-                    let mut layout = Layout::horizontal([Constraint::Fill(1), Constraint::Percentage(50), Constraint::Fill(1)]).split(area);
-                    layout = Layout::vertical([Constraint::Fill(1), Constraint::Percentage(50), Constraint::Fill(1)]).split(layout[1]);
-                    let selector_popup_area = layout[1];
-
-                    Clear.render(selector_popup_area, buf);
-                    selector.render(selector_popup_area, buf);
-                }
-                ClientState::AccessGroupIdEntry { text_entry, idx: _ } => {
-                    let mut layout = Layout::horizontal([Constraint::Fill(1), Constraint::Length(18), Constraint::Fill(1)]).split(area);
-                    layout = Layout::vertical([Constraint::Fill(1), Constraint::Length(3), Constraint::Fill(1)]).split(layout[1]);
-                    Clear.render(layout[1], buf);
-                    let block = Block::bordered();
-                    let text_entry_area = block.inner(layout[1]);
-                    block.title(" Enter ID ").render(layout[1], buf);
-                    text_entry.render(text_entry_area, buf);
-                }
-                ClientState::Blank => {}
-                ClientState::Error(errors) => {
-                    let mut layout = Layout::horizontal([Constraint::Fill(1), Constraint::Percentage(50), Constraint::Fill(1)]).split(area);
-                    layout = Layout::vertical([Constraint::Fill(1), Constraint::Percentage(50), Constraint::Fill(1)]).split(layout[1]);
-                    let error_popup_area = layout[1];
-
-                    let block = Block::bordered().title(" Error(s) ");
-
-                    let mut text = Text::default();
-                    for error in errors {
-                        let line = Line::from(format!("{:?}", error));
-                        text.push_line(line);
-                    }
-
-                    Clear.render(error_popup_area, buf);
-                    Paragraph::new(text).block(block).render(error_popup_area, buf);
-                }
-            }
+            sub_state.render(area, buf);
         }
         
     }
