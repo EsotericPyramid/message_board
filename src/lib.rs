@@ -29,6 +29,7 @@ pub const INHERIT_BASE: u8 = 0x00;
 pub const WHITE_BASE: u8 = 0x01;
 pub const BLACK_BASE: u8 = 0x02;
 
+
 #[cfg(test)]
 pub mod tests;
 
