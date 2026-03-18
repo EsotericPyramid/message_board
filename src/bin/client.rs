@@ -3,7 +3,7 @@
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal;
 use message_board::*;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Offset};
 use ratatui::style::{Style, Stylize};
 use ratatui::widgets::{Clear};
 use std::io::{Read, Write};
@@ -130,7 +130,9 @@ enum StateChange {
     Blank // means it was handled but no state change
 }
 
-trait InputWidget where for<'a> &'a Self: Widget {
+trait InputWidget {
+    fn render(&self, area: Rect, buf: &mut Buffer) -> Rect;
+
     fn handle_event(&mut self, event: Event) -> Option<StateChange>;
     // these functions may not mean anything for some widgets
     fn focus(&mut self) {}
@@ -290,14 +292,14 @@ impl<T> ScrollContainer<T> {
         }
     }
 
-    fn base_render<'a, U: Into<Line<'a>>, F: Fn(&T) -> String>(&self, area: Rect, buf: &mut Buffer, title: U, f: F) {
+    fn base_render<'a, U: Into<Line<'a>>, F: Fn(&T) -> String>(&self, area: Rect, buf: &mut Buffer, title: U, f: F) -> Rect {
         let mut block = Block::bordered()
             .title(title);
 
         if let Some(_) = self.cursor_pos { // ie. is focused
             block = block.border_style(Style::new().bold());
         }
-
+        
         let mut text = Text::default();
         for (idx, item) in self.items.iter().enumerate() {
             let mut line = Line::from((f)(item));
@@ -307,9 +309,16 @@ impl<T> ScrollContainer<T> {
             text.push_line(line);
         }
         
+        let sub_area = if let Some(cursor_pos) = self.cursor_pos {
+            let block_inner = block.inner(area);
+            Rect::new(block_inner.x, block_inner.y - cursor_pos as u16, block_inner.width, 1)
+        } else {
+            block.inner(area)
+        };
         Paragraph::new(text)
             .block(block)
             .render(area, buf);
+        sub_area
     }
 
     fn base_handle_event(&mut self, event: Event) -> Option<StateChange> {
@@ -364,13 +373,11 @@ impl Navigator {
     }
 }
 
-impl Widget for &Navigator {
-    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {
-        self.0.base_render(area, buf, " Children ", |x| x.1.clone());
-    }
-}
-
 impl InputWidget for Navigator {
+    fn render(&self, area: Rect, buf: &mut Buffer) -> Rect {
+        self.0.base_render(area, buf, " Children ", |x| x.1.clone())
+    }
+
     fn handle_event(&mut self, event: Event) -> Option<StateChange> {
         if let Some(event) = self.0.base_handle_event(event.clone()) {
             return Some(event)
@@ -408,13 +415,13 @@ impl EntryVariantSelector {
     }
 }
 
-impl Widget for &EntryVariantSelector {
-    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {
-        self.0.base_render(area, buf, " Entry Type Selection ", |x| String::from((*x).as_string()));
-    }
-}
+
 
 impl InputWidget for EntryVariantSelector {
+    fn render(&self, area: Rect, buf: &mut Buffer) -> Rect {
+        self.0.base_render(area, buf, " Entry Type Selection ", |x| String::from((*x).as_string()))
+    }
+
     fn handle_event(&mut self, event: Event) -> Option<StateChange> {
         if let Some(event) = self.0.base_handle_event(event.clone()) {
             return Some(event)
@@ -456,13 +463,12 @@ impl IdList {
     }
 }
 
-impl Widget for &IdList {
-    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {
-        self.container.base_render(area, buf, " id list (temp name) ", |x| format!("{:016X}", x));
-    }
-}
 
 impl InputWidget for IdList {
+    fn render(&self, area: Rect, buf: &mut Buffer) -> Rect {
+        self.container.base_render(area, buf, " id list (temp name) ", |x| format!("{:016X}", x))
+    }
+    
     fn handle_event(&mut self, event: Event) -> Option<StateChange> {
         if let Some(event) = self.container.base_handle_event(event.clone()) {
             return Some(event)
@@ -521,8 +527,9 @@ impl TextEntry {
     }
 }
 
-impl Widget for &TextEntry {
-    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {
+
+impl InputWidget for TextEntry {
+    fn render(&self, area: Rect, buf: &mut Buffer) -> Rect {
         let mut line = Line::default();
         line.push_span(self.text[..self.cursor_pos].iter().collect::<String>());
         if self.cursor_pos < self.max_size {
@@ -537,10 +544,9 @@ impl Widget for &TextEntry {
         }
         line.left_aligned()
             .render(area, buf);
+        area
     }
-}
 
-impl InputWidget for TextEntry {
     fn handle_event(&mut self, event: Event) -> Option<StateChange> {
         let mut matched = true;
         if let Event::Key(key_event) = event {
@@ -588,6 +594,8 @@ struct EntryViewer {
     y_select: usize,
     x_size: usize,
     y_size: usize,
+
+    is_focused: bool,
 }
 
 impl EntryViewer {
@@ -599,6 +607,8 @@ impl EntryViewer {
             y_select: 0,
             x_size: 0,
             y_size: 0,
+
+            is_focused: false,
         }
     }
 
@@ -645,12 +655,12 @@ impl EntryViewer {
     }
 }
 
-impl Widget for &EntryViewer {
-    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {
+impl InputWidget for EntryViewer {
+    fn render(&self, area: Rect, buf: &mut Buffer) -> Rect {
         let block = Block::bordered();
         let inner_area = block.inner(area);
         let mut title = Line::default();
-        match &self.entry {
+        let sub_area = match &self.entry {
             Some(entry) => {
                 match &entry.entry_data {
                     EntryData::Message { timestamp, message } => {
@@ -661,6 +671,7 @@ impl Widget for &EntryViewer {
                         title.push_span(" ");
 
                         Paragraph::new(message as &str).render(inner_area, buf);
+                        area
                     }
                     EntryData::AccessGroup { name, write_perms, read_perms } => {
                         title.push_span(" Access Group - ");
@@ -669,6 +680,7 @@ impl Widget for &EntryViewer {
                         let write_read_titles = [String::from(" Write (Base: "), String::from(" Read (Base: ")];
                         let write_read_layout = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).split(inner_area);
                         let mut x = 0;
+                        let mut sub_area = area;
                         for ((perm_set, mut perm_name ), area) in [write_perms, read_perms].iter().copied().zip(write_read_titles).zip(write_read_layout.iter().copied()) {
                             let block = Block::bordered();
                             let perm_set_area = block.inner(area);
@@ -679,7 +691,7 @@ impl Widget for &EntryViewer {
                                     let layout = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).split(perm_set_area);
                                     let mut whitelist = Text::default();
                                     whitelist.push_line("Whitelisted:");
-                                    if self.x_select == x {whitelist = whitelist.bold();}
+                                    if (self.x_select == x) & self.is_focused {whitelist = whitelist.bold(); sub_area = layout[0]}
                                     x += 1;
                                     for id in whitelist_ids {
                                         let mut line = Line::default();
@@ -689,7 +701,7 @@ impl Widget for &EntryViewer {
                                     }
                                     let mut blacklist = Text::default();
                                     blacklist.push_line("Blacklisted:");
-                                    if self.x_select == x {blacklist = blacklist.bold();}
+                                    if (self.x_select == x) & self.is_focused {blacklist = blacklist.bold(); sub_area = layout[1]}
                                     x += 1;
                                     for id in blacklist_ids {
                                         let mut line = Line::default();
@@ -703,7 +715,7 @@ impl Widget for &EntryViewer {
                                 DefaultedIdSet::White { blacklist_ids } => {
                                     let mut blacklist = Text::default();
                                     blacklist.push_line("Blacklisted:");
-                                    if self.x_select == x {blacklist = blacklist.bold();}
+                                    if (self.x_select == x) & self.is_focused {blacklist = blacklist.bold(); sub_area = perm_set_area}
                                     x += 1;
                                     for id in blacklist_ids {
                                         let mut line = Line::default();
@@ -716,7 +728,7 @@ impl Widget for &EntryViewer {
                                 DefaultedIdSet::Black { whitelist_ids } => {
                                     let mut whitelist = Text::default();
                                     whitelist.push_line("Whitelisted:");
-                                    if self.x_select == x {whitelist = whitelist.bold();}
+                                    if (self.x_select == x) & self.is_focused {whitelist = whitelist.bold(); sub_area = perm_set_area}
                                     x += 1;
                                     for id in whitelist_ids {
                                         let mut line = Line::default();
@@ -729,19 +741,20 @@ impl Widget for &EntryViewer {
                             }
                             block.title(perm_name).render(area, buf);
                         }
+                        sub_area
                     }
                 }
             }
             None => {
                 Paragraph::new("No Entry To Display :P").centered().render(inner_area, buf);
+                area
             }
-        }
+        };
 
         block.title(title).render(area, buf);
+        sub_area
     }
-}
 
-impl InputWidget for EntryViewer {
     fn handle_event(&mut self, event: Event) -> Option<StateChange> {
         if let Some(entry) = &mut self.entry {
             //universal stuff
@@ -821,6 +834,9 @@ impl InputWidget for EntryViewer {
         None
     }
 
+    fn focus(&mut self) {self.is_focused = true}
+    fn unfocus(&mut self) {self.is_focused = false}
+
     fn consume_child(&mut self, child: ClientState) -> Option<StateChange> {
         if let Some(entry) = &mut self.entry {
             match (&mut entry.entry_data, child) {
@@ -858,7 +874,7 @@ impl InputWidget for EntryViewer {
 }
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum TreeViewerState {
     Content,
     Navigate,
@@ -963,8 +979,8 @@ impl Drop for EntryTreeViewer {
     }
 }
 
-impl Widget for &EntryTreeViewer {
-    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {
+impl InputWidget for EntryTreeViewer {
+    fn render(&self, area: Rect, buf: &mut Buffer) -> Rect {
         let mut layout = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).split(area);
         let path_area = layout[0];
         layout = Layout::horizontal([Constraint::Fill(4), Constraint::Fill(1)]).split(layout[1]);
@@ -973,19 +989,25 @@ impl Widget for &EntryTreeViewer {
 
         Clear.render(area, buf);
         self.path.render(path_area, buf);
-        self.navigator.render(navigator_area, buf);
-        self.viewer.render(content_area, buf);
+        let navigator_sub_area = self.navigator.render(navigator_area, buf);
+        let content_sub_area = self.viewer.render(content_area, buf);
+        eprintln!("EntryTreeViewer: {:?}", content_sub_area);
+        let mut matched_state = self.state;
+        if let TreeViewerState::Unfocused = matched_state {matched_state = self.awaited_child_parent.unwrap_or(TreeViewerState::Unfocused)}
+        match matched_state {
+            TreeViewerState::Unfocused => area,
+            TreeViewerState::Content => content_sub_area,
+            TreeViewerState::Navigate => navigator_sub_area,
+        }
     }
-}
 
-impl InputWidget for EntryTreeViewer {
     fn handle_event(&mut self, event: Event) -> Option<StateChange> {
         let mut matched = false;
         if let Event::Key(key_event) = event.clone() {
             matched = true;
             self.awaited_child_parent = Some(TreeViewerState::Unfocused);            
             match key_event.code {
-                KeyCode::Char('h') if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
+                KeyCode::Char('H') if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
                     if let Err(e) = self.pop_active_entry() {
                         return Some(StateChange::Push(ClientState::Error(vec![e])));
                     }
@@ -1116,11 +1138,8 @@ struct AccessGroupIdList {
     idx: usize,
 }
 
-impl Widget for &AccessGroupIdList {
-    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {self.id_list.render(area, buf)}
-}
-
 impl InputWidget for AccessGroupIdList {
+    fn render(&self, area: Rect, buf: &mut Buffer) -> Rect {self.id_list.render(area, buf)}
     fn handle_event(&mut self, event: Event) -> Option<StateChange> {self.id_list.handle_event(event)}
     fn focus(&mut self) {self.id_list.focus();}
     fn unfocus(&mut self) {self.id_list.unfocus();}
@@ -1263,8 +1282,8 @@ enum ClientState {
     Error(Vec<DataError>),
 }
 
-impl Widget for &ClientState {
-    fn render(self, area: Rect, buf: &mut Buffer) where Self: Sized {
+impl InputWidget for ClientState {
+    fn render(&self, area: Rect, buf: &mut Buffer) -> Rect {
         match self {
             ClientState::Viewer(viewer) => viewer.render(area, buf),
             ClientState::WriteVarientSelection(selector) => selector.render(area, buf),
@@ -1285,13 +1304,15 @@ impl Widget for &ClientState {
 
                 Clear.render(error_popup_area, buf);
                 Paragraph::new(text).block(block).render(error_popup_area, buf);
-            },
-            ClientState::Blank => eprintln!("attempted to display a Blank ClientState, this should never be displayed during proper functioning"),
+                error_popup_area
+            }
+            ClientState::Blank => {
+                eprintln!("attempted to display a Blank ClientState, this should never be displayed during proper functioning");
+                area
+            }
         }
     }
-}
 
-impl InputWidget for ClientState {
     fn handle_event(&mut self, event: Event) -> Option<StateChange> {
         match self {
             ClientState::Viewer(viewer) => viewer.handle_event(event),
@@ -1606,11 +1627,11 @@ impl Widget for &Client {
             let title_line = Line::from(" Message Board - by EsotericPyramid ");
             title_line.centered().render(layout[0], buf);
         }
-        let area = layout[1];
+        let mut area = layout[1];
         for sub_state in &self.state {
-            sub_state.render(area, buf);
-        }
-        
+            eprintln!("{:?}", sub_state);
+            area = sub_state.render(area, buf);
+        } 
     }
 }
 
