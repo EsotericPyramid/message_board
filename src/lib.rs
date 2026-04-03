@@ -30,6 +30,8 @@ pub const WHITE_BASE: u8 = 0x01;
 pub const BLACK_BASE: u8 = 0x02;
 
 
+pub mod cryptography;
+
 #[cfg(test)]
 pub mod tests;
 
@@ -104,28 +106,29 @@ fn read_u8(data_iter: &mut impl Iterator<Item = u8>) -> Result<u8, DataError> {
     data_iter.next().ok_or(DataError::InsufficientBytes)
 }
 
-fn read_u16(data_iter: &mut impl Iterator<Item = u8>) -> Result<u16, DataError> {
-    let mut num = [0; 2];
-    for i in 0..2 {
-        num[i] = read_u8(data_iter)?;
-    }
-    Ok(u16::from_le_bytes(num))
+macro_rules! read_num_impls {
+    ($($ident:ident: $ty:ty, $size:literal;)*) => {
+        $(
+            fn $ident(data_iter: &mut impl Iterator<Item = u8>) -> Result<$ty, DataError> {
+                read_arr::<$size>(data_iter).map(|x| <$ty>::from_le_bytes(x))
+            }
+        )*
+    };
 }
 
-fn read_u32(data_iter: &mut impl Iterator<Item = u8>) -> Result<u32, DataError> {
-    let mut num = [0; 4];
-    for i in 0..4 {
-        num[i] = read_u8(data_iter)?;
-    }
-    Ok(u32::from_le_bytes(num))
-}
+read_num_impls!(
+    read_u16: u16, 2;
+    read_u32: u32, 4;
+    read_u64: u64, 8;
+    read_u128: u128, 16;
+);
 
-fn read_u64(data_iter: &mut impl Iterator<Item = u8>) -> Result<u64, DataError> {
-    let mut num = [0; 8];
-    for i in 0..8 {
-        num[i] = read_u8(data_iter)?;
+fn read_arr<const U: usize>(data_iter: &mut impl Iterator<Item = u8>) -> Result<[u8; U], DataError> {
+    let mut arr = [0; U];
+    for i in 0..U {
+        arr[i] = read_u8(data_iter)?;
     }
-    Ok(u64::from_le_bytes(num))
+    Ok(arr)
 }
 
 macro_rules! bounded_usize {

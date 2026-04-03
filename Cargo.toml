@@ -7,8 +7,12 @@ edition = "2024"
 ratatui = "0.30.0"
 crossterm = "0.29.0"
 chrono = "0.4.43"
-rand = "0.9.2"
+rand = "0.10.0"
 toml = "1.0.3"
+aes-gcm = { version = "0.10.3", features = ["rand_core"] }
+ml-kem = "0.2.3"
+typenum = "1.19.0"
+rand_chacha = "0.3.1"
 
 [[bin]]
 name = "client"
