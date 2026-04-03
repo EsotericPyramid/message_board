@@ -1,9 +1,18 @@
-use rand::{distr::Distribution, Rng};
+use rand::distr::uniform::SampleRange;
+use rand::{distr::Distribution, Rng, RngExt};
 
 use crate::*;
+use crate::cryptography::{AeadKey, get_sys_rng};
 
 const RANDOM_TEST_RETRIES: usize = 100;
 const RANDOM_CHAR_RANGE: std::ops::Range<char> = '\u{0000}'..'\u{10ff}';
+
+fn rand_bytes(mut rng: impl Rng, size_range: impl SampleRange<usize>) -> Vec<u8> {
+    let data_size = rng.random_range(size_range);
+    let mut data = vec![0u8; data_size];
+    rng.fill_bytes(&mut data);
+    data
+}
 
 fn get_char_rng(rng: impl Rng) -> impl Iterator<Item = char> {
     rand::distr::Uniform::try_from(RANDOM_CHAR_RANGE).unwrap().sample_iter(rng)
@@ -207,7 +216,6 @@ fn response_data_conversion() {
     }
 }
 
-
 #[test]
 fn response_size_hint() {
     let mut rng = rand::rng();
@@ -216,4 +224,81 @@ fn response_size_hint() {
         let response = rand_response(&mut rng, &mut char_rng);
         assert_eq!(response.size_hint(), response.into_data().unwrap().len(), "Incorrect size hint");
     }
+}
+
+#[test]
+fn aead_data_conversion() {
+    let mut rng = rand::rng();
+    for _ in 0..RANDOM_TEST_RETRIES {
+        let key = AeadKey::new_random(&mut rng);
+        assert_eq!(key, AeadKey::from_data(&key.into_data().unwrap()).unwrap(), "Invalid AeadKey Converstion");
+    }
+}
+
+
+#[test]
+fn aead_size_hint() {
+    let mut rng = rand::rng();
+    for _ in 0..RANDOM_TEST_RETRIES {
+        let key = AeadKey::new_random(&mut rng);
+        assert_eq!(key.size_hint(), key.into_data().unwrap().len(), "Invalid Size Hint");
+    }
+}
+
+#[test]
+fn aead() {
+    let mut rng = rand::rng();
+    let mut encrypt_key = AeadKey::new_random(get_sys_rng());
+    let mut decrypt_key = encrypt_key.clone();
+
+    for _ in 0..RANDOM_TEST_RETRIES {
+        let data = rand_bytes(&mut rng, 0..65536);
+        let associated = rand_bytes(&mut rng, 0..256);
+        let (nonce, encrypted)= encrypt_key.encrypt(&data, &associated).unwrap();
+        let decrypted = decrypt_key.decrypt(nonce, &encrypted, &associated).unwrap();
+        assert_eq!(data, decrypted);
+    }
+}
+
+#[test]
+#[should_panic]
+fn aead_replay_attack() {
+    let mut rng = rand::rng();
+    let mut encrypt_key = AeadKey::new_random(get_sys_rng());
+    let mut decrypt_key = encrypt_key.clone();
+
+    // get it into a real state
+    for _ in 0..10 {
+        let data = rand_bytes(&mut rng, 0..65536);
+        let associated = rand_bytes(&mut rng, 0..256);
+        let (nonce, encrypted)= encrypt_key.encrypt(&data, &associated).unwrap();
+        let _ = decrypt_key.decrypt(nonce, &encrypted, &associated).unwrap();
+    }
+
+    let data = rand_bytes(&mut rng, 0..65536);
+    let associated = rand_bytes(&mut rng, 0..256);
+    let (nonce, encrypted)= encrypt_key.encrypt(&data, &associated).unwrap();
+    let _ = decrypt_key.decrypt(nonce, &encrypted, &associated).unwrap();
+    let _ = decrypt_key.decrypt(nonce, &encrypted, &associated).unwrap(); // <-- should panic here
+}
+
+#[test]
+#[should_panic]
+fn aead_incorrect_nonce() {
+    let mut rng = rand::rng();
+    let mut encrypt_key = AeadKey::new_random(get_sys_rng());
+    let mut decrypt_key = encrypt_key.clone();
+
+    // get it into a real state
+    for _ in 0..10 {
+        let data = rand_bytes(&mut rng, 0..65536);
+        let associated = rand_bytes(&mut rng, 0..256);
+        let (nonce, encrypted)= encrypt_key.encrypt(&data, &associated).unwrap();
+        let _ = decrypt_key.decrypt(nonce, &encrypted, &associated).unwrap();
+    }
+
+    let data = rand_bytes(&mut rng, 0..65536);
+    let associated = rand_bytes(&mut rng, 0..256);
+    let (nonce, encrypted)= encrypt_key.encrypt(&data, &associated).unwrap();
+    let _ = decrypt_key.decrypt(nonce+1, &encrypted, &associated).unwrap(); // <-- should panic here
 }

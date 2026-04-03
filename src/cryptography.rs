@@ -1,29 +1,34 @@
 use aes_gcm::aead::{self, Aead};
-use aes_gcm::{AeadCore, KeyInit, KeySizeUser};
+use aes_gcm::{KeyInit, KeySizeUser};
 use ml_kem::EncodedSizeUser;
+use rand::rand_core::UnwrapErr;
 use typenum::marker_traits::Unsigned;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::rand_core::RngCore;
 
 use super::*;
 
-type CryptoRng = rand_chacha::ChaCha20Rng;
+pub type CryptoRng = rand_chacha::ChaCha20Rng;
+pub type SysRng = UnwrapErr<rand::rngs::SysRng>;
 
-type KemParams = ml_kem::MlKem1024Params;
-type Encapsulator = ml_kem::kem::EncapsulationKey<KemParams>;
-type Decapsulator = ml_kem::kem::DecapsulationKey<KemParams>;
+pub type KemParams = ml_kem::MlKem1024Params;
+pub type Encapsulator = ml_kem::kem::EncapsulationKey<KemParams>;
+pub type Decapsulator = ml_kem::kem::DecapsulationKey<KemParams>;
 
-type RawAead = aes_gcm::Aes256Gcm;
-type RawAeadKey = aes_gcm::Key<RawAead>;
-type RawAeadNonce = [u8; 12];
+pub type RawAead = aes_gcm::Aes256Gcm;
+pub type RawAeadKey = aes_gcm::Key<RawAead>;
+pub type RawAeadNonce = [u8; 12];
 
-struct AeadKey {
+pub const fn get_sys_rng() -> SysRng {UnwrapErr(rand::rngs::SysRng)}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AeadKey {
     key: RawAeadKey,
     nonce_rng: CryptoRng,
 }
 
 impl AeadKey {
-    fn new_random(mut rng: impl rand::CryptoRng) -> Self {
+    pub fn new_random(mut rng: impl rand::CryptoRng) -> Self {
         let mut seed= [0u8; 32];
         rng.fill_bytes(&mut seed);
         let mut rng = CryptoRng::from_seed(seed); // getting an rng Aead is happy working with (from rand 0.6.4, not 0.10.0)
@@ -31,14 +36,16 @@ impl AeadKey {
         let key = RawAead::generate_key(&mut rng);
         let mut nonce_seed= [0u8; 32];
         rng.fill_bytes(&mut nonce_seed);
-        let nonce_rng = CryptoRng::from_seed(seed);
-        let mut counter: [u8; 16] = [0; _];
-        rng.fill_bytes(&mut counter);
-        let counter = u128::from_ne_bytes(counter);
+        let mut nonce_rng = CryptoRng::from_seed(seed);
+        let mut nonce_rng_start: [u8; 16] = [0; _];
+        rng.fill_bytes(&mut nonce_rng_start);
+        let nonce_rng_start = u128::from_ne_bytes(nonce_rng_start);
+        nonce_rng.set_word_pos(nonce_rng_start);
+        nonce_rng.set_stream(rng.next_u64());
         Self { key, nonce_rng }
     }
 
-    fn encrypt(&mut self, to_encrypt: &[u8], associated: &[u8]) -> Result<(u128, Vec<u8>), aes_gcm::Error> {
+    pub fn encrypt(&mut self, to_encrypt: &[u8], associated: &[u8]) -> Result<(u128, Vec<u8>), aes_gcm::Error> {
         let mut raw_nonce: RawAeadNonce = [0; _];
         let mut nonce = self.nonce_rng.get_word_pos();
         while raw_nonce == [0; _] {
@@ -55,9 +62,9 @@ impl AeadKey {
         ciphertext.map(|encrypted| (nonce, encrypted))
     }
 
-    fn decrypt(&mut self, nonce: u128, to_decrypt: &[u8], associated: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
+    pub fn decrypt(&mut self, nonce: u128, to_decrypt: &[u8], associated: &[u8]) -> Result<Vec<u8>, aes_gcm::Error> {
         let mut raw_nonce: RawAeadNonce = [0; _];
-        if nonce <= self.nonce_rng.get_word_pos() {return Err(aes_gcm::Error)}
+        if nonce < self.nonce_rng.get_word_pos() {return Err(aes_gcm::Error)}
         self.nonce_rng.set_word_pos(nonce);
         self.nonce_rng.fill_bytes(&mut raw_nonce);
         let payload = aead::Payload{
