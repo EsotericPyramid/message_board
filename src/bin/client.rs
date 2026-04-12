@@ -3,7 +3,7 @@
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use message_board::*;
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Style, Stylize};
+use ratatui::style::Stylize;
 use ratatui::widgets::{Clear};
 use std::io::Write;
 use ratatui::{
@@ -616,7 +616,7 @@ impl InputWidget for EntryViewer {
                     }
                     if id_lists[access_group_list.idx] != &access_group_list.id_list.container.items {
                         self.has_mutated = true;
-                        std::mem::replace(id_lists[access_group_list.idx],access_group_list.id_list.container.items);
+                        let _ = std::mem::replace(id_lists[access_group_list.idx],access_group_list.id_list.container.items);
                     }
                 }
                 (_, ClientState::Blank | ClientState::Error(_)) => {}
@@ -664,7 +664,7 @@ impl EntryTreeViewer {
             terminal,
         };
 
-        viewer.push_active_entry(ROOT_ID); // FIXME: scuff, really there is no "last" entry_id
+        viewer.push_active_entry(ROOT_ID)?; // FIXME: scuff, really there is no "last" entry_id
 
         Ok(viewer)
     }
@@ -682,7 +682,7 @@ impl EntryTreeViewer {
         self.navigator.replace_items(&new_entry.header_data.children_ids); // temporary
         let old_entry_id = self.path.peek().map(|x| x.0); //jank
         self.path.pop();
-        self.path.push(new_entry_id, &new_entry);
+        self.path.push(new_entry_id, &new_entry)?;
         if let (Some(old_entry), Some(old_entry_id)) = (self.viewer.add_entry(new_entry), old_entry_id) {
             board.edit_entry(old_entry_id, old_entry)?;
         }
@@ -694,7 +694,7 @@ impl EntryTreeViewer {
         let new_entry = board.get_entry(new_entry_id)?;
         self.navigator.replace_items(&new_entry.header_data.children_ids); // temporary
         let old_entry_id = self.path.peek().map(|x| x.0); //jank
-        self.path.push(new_entry_id, &new_entry);
+        self.path.push(new_entry_id, &new_entry)?;
         if let (Some(old_entry), Some(old_entry_id)) = (self.viewer.add_entry(new_entry), old_entry_id) {
             board.edit_entry(old_entry_id, old_entry)?;
         }
@@ -793,7 +793,7 @@ impl InputWidget for EntryTreeViewer {
                     match state_change {
                         StateChange::Pop => {
                             let new_entry_id = self.navigator.0.selection().unwrap().1.0;
-                            self.push_active_entry(new_entry_id);
+                            if let Err(e) = self.push_active_entry(new_entry_id) {return Some(StateChange::Push(ClientState::Error(vec![e])))};
                             return Some(StateChange::Blank);
                         },
                         StateChange::MoveLeft => {self.set_state(TreeViewerState::Content);},
@@ -866,9 +866,6 @@ impl InputWidget for EntryTreeViewer {
                                         read_perms: DefaultedIdSet::Inherit { whitelist_ids: Vec::new(), blacklist_ids: Vec::new() },
                                     }
                                 })
-                            }
-                            _ => {
-                                None
                             }
                         };
                         if let Some(entry) = entry {

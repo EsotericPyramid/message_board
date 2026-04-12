@@ -5,9 +5,8 @@ use crate::*;
 use crate::cryptography::{
     get_crypto_rng, 
     get_kem_set, 
-    get_old_sys_rng, 
     get_sys_rng, 
-    AeadKey, 
+    UserAeadKey, 
     DecapsulationKey, 
     EncapsulationKey, 
     KEM_KEY_SIZE
@@ -122,6 +121,32 @@ fn rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>) -> 
             let entry_id = rng.next_u64();
             let entry = rand_entry(&mut rng, &mut char_rng);
             BoardRequest::EditEntry { user_id, entry_id, entry }
+        }
+        3 => {
+            let user_id = rng.next_u64();
+            BoardRequest::GetUser { user_id }
+        }
+        4 => {
+            BoardRequest::AddUser
+        }
+        _ => panic!("Request Type should be in range")
+    }
+}
+
+fn new_rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>, sender_user_id: u64) -> BoardRequest {
+    match rng.random_range(0..5) {
+        0 => {
+            let entry_id = rng.next_u64();
+            BoardRequest::GetEntry { user_id: sender_user_id, entry_id }
+        }
+        1 => {
+            let entry = rand_entry(&mut rng, &mut char_rng);
+            BoardRequest::AddEntry { user_id: sender_user_id, entry }
+        }
+        2 => {
+            let entry_id = rng.next_u64();
+            let entry = rand_entry(&mut rng, &mut char_rng);
+            BoardRequest::EditEntry { user_id: sender_user_id, entry_id, entry }
         }
         3 => {
             let user_id = rng.next_u64();
@@ -259,11 +284,11 @@ fn kem_key_size_hint() {
 fn kem() {
     let mut rng = rand::rng();
     let mut crypto_rng = get_crypto_rng();
-    let (mut dk, mut ek) = get_kem_set(get_old_sys_rng());
+    let (dk, ek) = get_kem_set(get_sys_rng());
     for _ in 0..RANDOM_TEST_RETRIES {
         let data = rand_bytes(&mut rng, 0..=KEM_KEY_SIZE);
         let ct = ek.encapsulate(&mut crypto_rng, &data).unwrap();
-        let sk = dk.decapsulate(ct).unwrap().collect::<Vec<_>>();
+        let sk = dk.decapsulate(ct, data.len()).unwrap().collect::<Vec<_>>();
         assert_eq!(data, sk);
     }
 }
@@ -272,7 +297,7 @@ fn kem() {
 fn kem_size_check() {
     let mut rng = rand::rng();
     let mut crypto_rng = get_crypto_rng();
-    let (_, mut ek) = get_kem_set(get_old_sys_rng());
+    let (_, ek) = get_kem_set(get_sys_rng());
     for _ in 0..RANDOM_TEST_RETRIES {
         let data = rand_bytes(&mut rng, KEM_KEY_SIZE+1..KEM_KEY_SIZE + 128);
         let _ = ek.encapsulate(&mut crypto_rng, &data).expect_err("Kem Encapsulation incorrectly succeeded");
@@ -281,18 +306,18 @@ fn kem_size_check() {
 
 #[test]
 fn aead_data_conversion() {
-    let mut rng = rand::rng();
+    let mut rng = get_crypto_rng();
     for _ in 0..RANDOM_TEST_RETRIES {
-        let key = AeadKey::new_random(&mut rng);
-        assert_eq!(key, AeadKey::from_data(&key.into_data().unwrap()).unwrap(), "Invalid AeadKey Converstion");
+        let key = UserAeadKey::new_random(&mut rng);
+        assert_eq!(key, UserAeadKey::from_data(&key.into_data().unwrap()).unwrap(), "Invalid UserAeadKey Converstion");
     }
 }
 
 #[test]
 fn aead_size_hint() {
-    let mut rng = rand::rng();
+    let mut rng = get_crypto_rng();
     for _ in 0..RANDOM_TEST_RETRIES {
-        let key = AeadKey::new_random(&mut rng);
+        let key = UserAeadKey::new_random(&mut rng);
         assert_eq!(key.size_hint(), key.into_data().unwrap().len(), "Invalid Size Hint");
     }
 }
@@ -300,7 +325,7 @@ fn aead_size_hint() {
 #[test]
 fn aead() {
     let mut rng = rand::rng();
-    let mut encrypt_key = AeadKey::new_random(get_sys_rng());
+    let mut encrypt_key = UserAeadKey::new_random(get_sys_rng());
     let mut decrypt_key = encrypt_key.clone();
 
     for _ in 0..RANDOM_TEST_RETRIES {
@@ -315,7 +340,7 @@ fn aead() {
 #[test]
 fn aead_replay_attack() {
     let mut rng = rand::rng();
-    let mut encrypt_key = AeadKey::new_random(get_sys_rng());
+    let mut encrypt_key = UserAeadKey::new_random(get_sys_rng());
     let mut decrypt_key = encrypt_key.clone();
 
     // get it into a real state
@@ -336,7 +361,7 @@ fn aead_replay_attack() {
 #[test]
 fn aead_incorrect_nonce() {
     let mut rng = rand::rng();
-    let mut encrypt_key = AeadKey::new_random(get_sys_rng());
+    let mut encrypt_key = UserAeadKey::new_random(get_sys_rng());
     let mut decrypt_key = encrypt_key.clone();
 
     for _ in 0..RANDOM_TEST_RETRIES {
@@ -355,5 +380,30 @@ fn aead_incorrect_nonce() {
                 assert_ne!(data, decrypted, "Incorrect Nonce can extract data")
             } 
         }
+    }
+}
+
+#[test]
+fn new_board_request_data_conversion() {
+    let mut rng = rand::rng();
+    let mut char_rng = get_char_rng(rng.clone());
+    let mut crypto_rng = get_crypto_rng();
+
+    let user_id = rng.random();
+    let mut server_aead_key = UserAeadKey::new_random(&mut crypto_rng);
+    let user_aead_key = server_aead_key.clone();
+    let (kem_dk, kem_ek) = get_kem_set(&mut crypto_rng);
+    let mut user_key = PublicKeySet {
+        kem: kem_ek,
+        user_aead: Some((
+            user_id,
+            user_aead_key,
+        ))
+    };
+    for _ in 0..RANDOM_TEST_RETRIES {
+        let request = new_rand_request(&mut rng, &mut char_rng, user_id);
+        let encoded = request.new_into_data(&mut crypto_rng, Some(&mut user_key)).unwrap();
+        let decoded = BoardRequest::new_from_data(&kem_dk, |x| if x == user_id {Some(&mut server_aead_key)} else {None}, &encoded).unwrap();
+        assert_eq!(request, decoded);
     }
 }

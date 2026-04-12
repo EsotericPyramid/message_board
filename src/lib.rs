@@ -1,5 +1,11 @@
 use std::string::FromUtf8Error;
 
+use crate::cryptography::*;
+
+// this is the 0.6.4 version, vs the 0.10.0 version from the rand crate
+use rand_chacha::rand_core::RngCore as OldRngCore;
+use rand_chacha::rand_core::CryptoRng as OldCryptoRng; 
+
 pub const PORT: u16 = 8000;
 pub const ROOT_ID: u64 = 0x00_00_00_00_00_00_00_00;
 pub const ENTRY_MAGIC_NUMBER: u16 = 0x1234;
@@ -23,6 +29,10 @@ pub const ADD_ENTRY: u8 = 0x01;
 pub const EDIT_ENTRY: u8 = 0x02;
 pub const GET_USER: u8 = 0x20;
 pub const ADD_USER: u8 = 0x21;
+/// Kem encrypted variants
+pub const KEM_EXPOSED: u8 = 0x00;
+pub const KEM_FULL_ANON: u8 = 0x01;
+pub const KEM_USER: u8 = 0x02;
 
 /// access group
 pub const INHERIT_BASE: u8 = 0x00;
@@ -80,6 +90,9 @@ pub enum DataError {
     AlreadyExists,
     InsufficientPerms,
     BadCredentials,
+    MissingKey,
+    IncorrectKey,
+    EncryptionError,
 
     MalformedRoot,
     NonChild,
@@ -99,6 +112,12 @@ macro_rules! internal_error {
 impl From<FromUtf8Error> for DataError {
     fn from(value: FromUtf8Error) -> Self {
         DataError::StringError(value)
+    }
+}
+
+impl From<aes_gcm::Error> for DataError {
+    fn from(_: aes_gcm::Error) -> Self {
+        Self::EncryptionError
     }
 }
 
@@ -131,6 +150,7 @@ fn read_arr<const U: usize>(data_iter: &mut impl Iterator<Item = u8>) -> Result<
     Ok(arr)
 }
 
+#[macro_export]
 macro_rules! bounded_usize {
     ($expr:expr, $num:ty) => {
         {
@@ -675,9 +695,7 @@ impl AsData for BoardRequest {
     }
 }
 
-// the response 
-
-
+/// the response 
 #[derive(PartialEq, Eq, Debug)]
 pub enum BoardResponse {
     GetEntry(Entry),
@@ -792,5 +810,178 @@ impl AsData for MaybeBoardResponse {
                 1 + 1
             }
         }
+    }
+}
+
+pub struct PublicKeySet {
+    pub kem: EncapsulationKey,
+    pub user_aead: Option<(u64, UserAeadKey)>,
+}
+
+impl AsData for PublicKeySet {
+    fn size_hint(&self) -> usize {
+        self.kem.size_hint() + 1 + if let Some((_, aead)) = self.user_aead.as_ref() {8 + aead.size_hint()} else {0}
+    }
+
+    fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> where Self: Sized {
+        let kem = EncapsulationKey::from_data_iter(data_iter)?;
+        let has_user_aead = read_u8(data_iter)? != 0;
+        let mut user_aead = None;
+        if has_user_aead {
+            let user_id = read_u64(data_iter)?;
+            let aead = UserAeadKey::from_data_iter(data_iter)?;
+            user_aead = Some((user_id, aead));
+        }
+        Ok(Self {
+            kem,
+            user_aead,
+        })
+    }
+
+    fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
+        self.kem.extend_data(data)?;
+        data.push(self.user_aead.is_some() as u8);
+        if let Some((user_id, aead)) = self.user_aead.as_ref() {
+            data.extend_from_slice(&user_id.to_le_bytes());
+            aead.extend_data(data)?;
+        }
+        Ok(())
+    }
+}
+
+
+/// data format:
+///     version (u8): 00
+///     kem header varient (u8): 
+///     kem section: (will default to full anonymous when possible)
+///         0x00, exposed (the following data is not encrypted at all)
+///         0x01, full anonymous (raw kem):
+///             RawCipherText which yields 
+///                 256 bit aead key 
+///                 nonce is assumed 0
+///         0x02, user (using my kem wrapper):
+///             KemCipherText which yields:
+///                 user_id (u64) (mapped by server to that user's UserAeadKey)
+///                 nonce (u128) (not the true nonce, a counter fed into an rng to get the real nonce)
+///     aead section (or plaintext if the exposed kem variant):
+///         variant discriminant (u8) (listed with each variant)
+///         - variant specific data -
+/// 
+///     
+/// 
+/// GetEntry, 0x00 (user):
+///     entry_id (u64)
+/// 
+/// AddEntry, 0x01 (user):
+///     - Entry data - 
+/// 
+/// EditEntry, 0x03 (user): 
+///     entry_id (u64)
+///     - Entry data -
+/// 
+/// GetUser, 0x20 (any):
+///     user_id (u64)
+/// 
+/// AddUser, 0x21 (any):
+///     - no data -
+impl BoardRequest {
+
+    pub fn new_extend_data(&self, rng: impl OldCryptoRng + OldRngCore, keys: Option<&mut PublicKeySet>, data: &mut Vec<u8>) -> Result<(), DataError> {
+        data.push(REQUEST_FORMAT_VERSION); //version
+        let mut body = Vec::new();
+        match self {
+            // todo: change Vec::new's into Vec::with_capacity
+            BoardRequest::GetEntry { entry_id, .. } => {
+                body.push(GET_ENTRY);
+                body.extend_from_slice(&entry_id.to_le_bytes());
+            },
+            BoardRequest::AddEntry { entry, .. } => {
+                body.push(ADD_ENTRY);
+                entry.extend_data(&mut body)?;
+            },
+            BoardRequest::EditEntry { entry_id, entry, .. } => {
+                body.push(EDIT_ENTRY);
+                body.extend_from_slice(&entry_id.to_le_bytes());
+                entry.extend_data(&mut body)?;
+            }
+            BoardRequest::GetUser { user_id } => {
+                body.push(GET_USER);
+                body.extend_from_slice(&user_id.to_le_bytes());
+            },
+            BoardRequest::AddUser => {
+                body.push(ADD_USER);
+            },
+        };
+        match self {
+            BoardRequest::GetEntry { user_id, .. } | BoardRequest::AddEntry { user_id, ..} | BoardRequest::EditEntry { user_id, .. } => {
+                let Some(keys) = keys else {return Err(DataError::MissingKey)};
+                let Some((key_user_id, _)) = keys.user_aead else {return Err(DataError::MissingKey)};
+                if *user_id != key_user_id {return Err(DataError::IncorrectKey)}
+                data.push(KEM_USER);
+                extend_with_user_block(rng, keys, data, &mut body)?;
+            }
+            BoardRequest::GetUser { .. } | BoardRequest::AddUser { .. } => {
+                if let Some(keys) = keys {
+                    data.push(KEM_FULL_ANON);
+                    extend_with_full_anonymous_block(rng, keys, data, &mut body)?;
+                } else {
+                    data.push(KEM_EXPOSED);
+                    extend_with_exposed_block(data, &mut body)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn new_into_data(&self, rng: impl OldCryptoRng + OldRngCore, keys: Option<&mut PublicKeySet>) -> Result<Vec<u8>, DataError> {
+        let mut out = Vec::new();
+        self.new_extend_data(rng, keys, &mut out)?;
+        Ok(out)
+    }
+
+    pub fn new_from_data_iter<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(kem_dk: &DecapsulationKey, get_user_aead: F, data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> {
+        if read_u8(data_iter)? != REQUEST_FORMAT_VERSION {return Err(DataError::UnsupportedVersion)}
+        let mut user_id = None;
+        let mut body = match read_u8(data_iter)? {
+            KEM_EXPOSED => read_from_exposed_block(data_iter)?.collect(),
+            KEM_FULL_ANON => read_from_full_anonymous_block(kem_dk, data_iter)?,
+            KEM_USER => {
+                let (user, body) = read_from_user_block(kem_dk, data_iter, get_user_aead)?;
+                user_id = Some(user);
+                body
+            }
+            _ => {return Err(DataError::InvalidDiscriminant)}
+        }.into_iter();
+        let discriminant = read_u8(&mut body)?;
+        Ok(match discriminant {
+            // entry requests
+            GET_ENTRY => { // GetEntry
+                let entry_id = read_u64(&mut body)?;
+                BoardRequest::GetEntry { user_id: user_id.unwrap(), entry_id }
+            }
+            ADD_ENTRY => { // AddEntry
+                let entry = Entry::from_data_iter(&mut body)?;
+                BoardRequest::AddEntry { user_id: user_id.unwrap(), entry }
+            }
+            EDIT_ENTRY => {
+                let entry_id = read_u64(&mut body)?;
+                let entry = Entry::from_data_iter(&mut body)?;
+                BoardRequest::EditEntry { user_id: user_id.unwrap(), entry_id, entry }
+            }
+            // user requests
+            GET_USER => { // GetUser
+                let user_id = read_u64(&mut body)?;
+                BoardRequest::GetUser { user_id }
+            }
+            ADD_USER => { // AddUser
+                BoardRequest::AddUser
+            }
+            
+            _ => {return Err(DataError::InvalidDiscriminant)}
+        })
+    }
+
+    pub fn new_from_data<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(kem_dk: &DecapsulationKey, get_user_aead: F, data: &[u8]) -> Result<Self, DataError> {
+        Self::new_from_data_iter(kem_dk, get_user_aead, &mut data.into_iter().copied())
     }
 }
