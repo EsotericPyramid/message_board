@@ -1,4 +1,5 @@
 use rand::distr::uniform::SampleRange;
+use rand::seq::SliceRandom;
 use rand::{distr::Distribution, Rng, RngExt};
 
 use crate::*;
@@ -355,7 +356,9 @@ fn aead_replay_attack() {
     let associated = rand_bytes(&mut rng, 0..256);
     let (nonce, encrypted)= encrypt_key.encrypt(&data, &associated).unwrap();
     let _ = decrypt_key.decrypt(nonce, &encrypted, &associated).unwrap();
-    let _ = decrypt_key.decrypt(nonce, &encrypted, &associated).expect_err("Replay Attack Succeeded"); // <-- should panic here
+    let _ = decrypt_key.decrypt(nonce, &encrypted, &associated).expect_err("Replay attack succeeded in basic case"); // <-- should panic here
+
+
 }
 
 #[test]
@@ -374,7 +377,7 @@ fn aead_incorrect_nonce() {
         } else {
             let mut incorrect_nonce = nonce;
             while incorrect_nonce == nonce {
-                incorrect_nonce = rng.random();
+                incorrect_nonce = rng.random::<u128>() % AEAD_NONCE_MAX;
             }
             if let Ok(decrypted) = decrypt_key.decrypt(incorrect_nonce, &encrypted, &associated) { // <-- should fail here (astronomical chance that it may result in a "valid" decryption anyways)
                 assert_ne!(data, decrypted, "Incorrect Nonce can extract data")
@@ -395,15 +398,45 @@ fn new_board_request_data_conversion() {
     let (kem_dk, kem_ek) = get_kem_set(&mut crypto_rng);
     let mut user_key = PublicKeySet {
         kem: kem_ek,
-        user_aead: Some((
-            user_id,
+        user_aead: Some(
             user_aead_key,
-        ))
+        )
     };
     for _ in 0..RANDOM_TEST_RETRIES {
         let request = new_rand_request(&mut rng, &mut char_rng, user_id);
         let encoded = request.new_into_data(&mut crypto_rng, Some(&mut user_key)).unwrap();
         let decoded = BoardRequest::new_from_data(&kem_dk, |x| if x == user_id {Some(&mut server_aead_key)} else {None}, &encoded).unwrap();
         assert_eq!(request, decoded);
+    }
+}
+
+#[test]
+fn new_board_batched_request_data_conversion() {
+    let mut rng = rand::rng();
+    let mut char_rng = get_char_rng(rng.clone());
+    let mut crypto_rng = get_crypto_rng();
+
+    let user_id = rng.random();
+    let mut server_aead_key = UserAeadKey::new_random(&mut crypto_rng);
+    let user_aead_key = server_aead_key.clone();
+    let (kem_dk, kem_ek) = get_kem_set(&mut crypto_rng);
+    let mut user_key = PublicKeySet {
+        kem: kem_ek,
+        user_aead: Some(
+            user_aead_key,
+        )
+    };
+    for _ in 0..RANDOM_TEST_RETRIES {
+        let mut request_batch = Vec::new();
+        for _ in 0..AEAD_NONCE_MEMORY + 1 {
+            request_batch.push(new_rand_request(&mut rng, &mut char_rng, user_id))
+        }
+
+        let mut encoded_batch = request_batch.iter().map(|x| x.new_into_data(&mut crypto_rng, Some(&mut user_key)).unwrap()).enumerate().collect::<Vec<_>>();
+        encoded_batch.shuffle(&mut rng);
+        for (idx, encoded) in encoded_batch {
+            let decoded = BoardRequest::new_from_data(&kem_dk, |x| if x == user_id {Some(&mut server_aead_key)} else {None}, &encoded).unwrap();
+            assert_eq!(request_batch[idx], decoded);
+        }
     }
 }

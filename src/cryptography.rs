@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use aes_gcm::{KeyInit, KeySizeUser};
 use ml_kem::array::AssocArraySize;
 use aes_gcm::aead::{self, Aead};
@@ -25,6 +27,9 @@ pub const KEM_KEY_SIZE: usize = 32;
 type RawAead = aes_gcm::Aes256Gcm;
 pub type RawAeadKey = aes_gcm::Key<RawAead>;
 type RawAeadNonce = [u8; 12];
+pub const AEAD_NONCE_MEMORY: usize = 4;
+const AEAD_NONCE_RNG_STRIDE: u128 = 3; // in words, needs to be tested
+pub const AEAD_NONCE_MAX: u128 = (1 << 68) -1; //its actually only 68 bit
 
 impl AsData for RawKemCipherText {
     fn size_hint(&self) -> usize {self.len()}
@@ -156,26 +161,36 @@ impl AsData for SimpleAeadKey {
 }
 
 
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct UserAeadKey {
     key: RawAeadKey,
     nonce_rng: CryptoRng,
+    old_nonces: VecDeque<u128>,
 }
 
 impl UserAeadKey {
     pub fn new_random(mut rng: impl OldCryptoRng + OldRngCore) -> Self {
         let key = RawAead::generate_key(&mut rng);
         let nonce_rng = get_full_rand_crypto_rng(rng);
-        Self { key, nonce_rng }
+        Self { key, nonce_rng, old_nonces: VecDeque::new() }
+    }
+
+    fn increment_nonce(&mut self) -> (u128, RawAeadNonce) {
+        let mut raw_nonce: RawAeadNonce = [0; _];
+        let nonce = self.nonce_rng.get_word_pos();
+        self.nonce_rng.fill_bytes(&mut raw_nonce);
+        (nonce, raw_nonce)
+    }
+
+    fn add_old_nonce(&mut self, nonce: u128) {
+        if self.old_nonces.len() >= AEAD_NONCE_MEMORY {self.old_nonces.pop_front();}
+        self.old_nonces.push_back(nonce);
     }
 
     pub fn encrypt(&mut self, to_encrypt: &[u8], associated: &[u8]) -> Result<(u128, Vec<u8>), DataError> {
-        let mut raw_nonce: RawAeadNonce = [0; _];
-        let mut nonce = self.nonce_rng.get_word_pos();
-        while raw_nonce == [0; _] {
-            nonce = self.nonce_rng.get_word_pos();
-            self.nonce_rng.fill_bytes(&mut raw_nonce);
-        }
+        let (nonce, raw_nonce) = self.increment_nonce();
+        self.add_old_nonce(nonce);
         let payload = aead::Payload{
             msg: to_encrypt,
             aad: associated
@@ -187,19 +202,61 @@ impl UserAeadKey {
     }
 
     pub fn decrypt(&mut self, nonce: u128, to_decrypt: &[u8], associated: &[u8]) -> Result<Vec<u8>, DataError> {
-        let mut raw_nonce: RawAeadNonce = [0; _];
-        if nonce < self.nonce_rng.get_word_pos() {return Err(aes_gcm::Error.into())}
-        let old_count = self.nonce_rng.get_word_pos();
-        self.nonce_rng.set_word_pos(nonce);
-        self.nonce_rng.fill_bytes(&mut raw_nonce);
+        println!("nonce: {}, head: {}, old_nonces: {:?}", nonce, self.nonce_rng.get_word_pos(), self.old_nonces);
+
+        fn inner(key: &UserAeadKey, raw_nonce: RawAeadNonce, payload: aead::Payload<'_, '_>) -> Result<Vec<u8>, DataError> {
+            let aead = RawAead::new(&key.key);
+            let result = aead.decrypt(&raw_nonce.into(), payload);
+            Ok(result?)
+        }
+
+        if nonce > AEAD_NONCE_MAX {return Err(DataError::EncryptionError)}
         let payload = aead::Payload{
             msg: to_decrypt,
             aad: associated
         };
-        let aead = RawAead::new(&self.key);
-        let result = aead.decrypt(&raw_nonce.into(), payload);
-        if result.is_err() {self.nonce_rng.set_word_pos(old_count);}
-        Ok(result?)
+        
+        if nonce < self.nonce_rng.get_word_pos() {
+            if let Ok(idx) = self.old_nonces.binary_search(&nonce) {
+                let old_count = self.nonce_rng.get_word_pos();
+                self.nonce_rng.set_word_pos(nonce);
+                let (_, raw_nonce) = self.increment_nonce();
+                let result = inner(&self, raw_nonce, payload);
+                if result.is_ok() {
+                    self.old_nonces.remove(idx);
+                }
+                self.nonce_rng.set_word_pos(old_count);
+                result
+            } else {
+                return Err(aes_gcm::Error.into())
+            }
+        } else {
+            // this could prolly be better, but i can't be bothered
+            let old_head = self.nonce_rng.get_word_pos();
+            let old_old_nonces = self.old_nonces.clone();
+            
+            if nonce > self.nonce_rng.get_word_pos() {
+                // note: this is probably excessive, i may choose to disallow changing position in a stride
+                self.add_old_nonce(old_head);
+                let mut new_stride_start = old_head + (nonce % AEAD_NONCE_RNG_STRIDE) - (old_head % AEAD_NONCE_RNG_STRIDE);
+                let num_nonces_jumped = (nonce - new_stride_start) / AEAD_NONCE_RNG_STRIDE;
+                if num_nonces_jumped > 4 {
+                    new_stride_start += (num_nonces_jumped - 4) * AEAD_NONCE_RNG_STRIDE;
+                }
+                self.nonce_rng.set_word_pos(new_stride_start);
+            }
+            let (mut current_nonce, mut raw_nonce) = self.increment_nonce();
+            while current_nonce < nonce {
+                self.add_old_nonce(current_nonce);
+                (current_nonce, raw_nonce) = self.increment_nonce();
+            }
+            let result = inner(&self, raw_nonce, payload);
+            if result.is_err() {
+                self.nonce_rng.set_word_pos(old_head);
+                self.old_nonces = old_old_nonces;
+            }
+            result
+        }
     }
 }
 
@@ -208,7 +265,7 @@ impl AsData for UserAeadKey {
     fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> where Self: Sized {
         let key = RawAeadKey::from_data_iter(data_iter)?;
         let nonce_rng = CryptoRng::from_data_iter(data_iter)?;
-        Ok(Self{key, nonce_rng})
+        Ok(Self{key, nonce_rng, old_nonces: VecDeque::new()})
     }
     fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
         self.key.extend_data(data)?;
@@ -298,7 +355,6 @@ impl DecapsulationKey {
     pub fn raw_decapsulate(&self, cipher_text: RawKemCipherText) -> Result<RawSharedKey, DataError> {self.key.decapsulate(&cipher_text).map_err(|_| DataError::EncryptionError)}
 }
 
-
 impl AsData for DecapsulationKey {
     fn size_hint(&self) -> usize {self.key.size_hint()}
     fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> where Self: Sized {
@@ -363,8 +419,8 @@ pub fn read_from_full_anonymous_block(kem_dk: &DecapsulationKey, input_stream: &
     Ok(aead_pt)
 }
 
-pub fn extend_with_user_block(rng: impl OldCryptoRng + OldRngCore, keys: &mut PublicKeySet, output_stream: &mut Vec<u8>, to_encrypt: &[u8]) -> Result<(), DataError> {
-    let Some((user_id, ref mut aead)) = keys.user_aead else {return Err(DataError::MissingKey);};
+pub fn extend_with_user_block(rng: impl OldCryptoRng + OldRngCore, keys: &mut PublicKeySet, user_id: u64, output_stream: &mut Vec<u8>, to_encrypt: &[u8]) -> Result<(), DataError> {
+    let Some(aead) = keys.user_aead.as_mut() else {return Err(DataError::MissingKey);};
     // todo: see if I want to use any associated data
     let (nonce, aead_ct) = aead.encrypt(to_encrypt, &[])?;
     let mut kem_sk: Vec<u8> = Vec::new();
@@ -388,3 +444,4 @@ pub fn read_from_user_block<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(k
     let aead_pt = aead.decrypt(nonce, &input_stream.take(aead_len).collect::<Vec<_>>(), &[])?;
     Ok((user_id, aead_pt))
 }
+

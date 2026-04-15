@@ -815,12 +815,12 @@ impl AsData for MaybeBoardResponse {
 
 pub struct PublicKeySet {
     pub kem: EncapsulationKey,
-    pub user_aead: Option<(u64, UserAeadKey)>,
+    pub user_aead: Option<UserAeadKey>,
 }
 
 impl AsData for PublicKeySet {
     fn size_hint(&self) -> usize {
-        self.kem.size_hint() + 1 + if let Some((_, aead)) = self.user_aead.as_ref() {8 + aead.size_hint()} else {0}
+        self.kem.size_hint() + 1 + if let Some(aead) = self.user_aead.as_ref() {aead.size_hint()} else {0}
     }
 
     fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> where Self: Sized {
@@ -828,9 +828,8 @@ impl AsData for PublicKeySet {
         let has_user_aead = read_u8(data_iter)? != 0;
         let mut user_aead = None;
         if has_user_aead {
-            let user_id = read_u64(data_iter)?;
             let aead = UserAeadKey::from_data_iter(data_iter)?;
-            user_aead = Some((user_id, aead));
+            user_aead = Some(aead);
         }
         Ok(Self {
             kem,
@@ -841,8 +840,7 @@ impl AsData for PublicKeySet {
     fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
         self.kem.extend_data(data)?;
         data.push(self.user_aead.is_some() as u8);
-        if let Some((user_id, aead)) = self.user_aead.as_ref() {
-            data.extend_from_slice(&user_id.to_le_bytes());
+        if let Some(aead) = self.user_aead.as_ref() {
             aead.extend_data(data)?;
         }
         Ok(())
@@ -915,10 +913,8 @@ impl BoardRequest {
         match self {
             BoardRequest::GetEntry { user_id, .. } | BoardRequest::AddEntry { user_id, ..} | BoardRequest::EditEntry { user_id, .. } => {
                 let Some(keys) = keys else {return Err(DataError::MissingKey)};
-                let Some((key_user_id, _)) = keys.user_aead else {return Err(DataError::MissingKey)};
-                if *user_id != key_user_id {return Err(DataError::IncorrectKey)}
                 data.push(KEM_USER);
-                extend_with_user_block(rng, keys, data, &mut body)?;
+                extend_with_user_block(rng, keys, *user_id, data, &mut body)?;
             }
             BoardRequest::GetUser { .. } | BoardRequest::AddUser { .. } => {
                 if let Some(keys) = keys {
