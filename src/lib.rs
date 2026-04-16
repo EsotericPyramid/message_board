@@ -883,8 +883,7 @@ impl AsData for PublicKeySet {
 /// AddUser, 0x21 (any):
 ///     - no data -
 impl BoardRequest {
-
-    pub fn new_extend_data(&self, rng: impl OldCryptoRng + OldRngCore, keys: Option<&mut PublicKeySet>, data: &mut Vec<u8>) -> Result<(), DataError> {
+    pub fn secure_extend_data(&self, rng: impl OldCryptoRng + OldRngCore, keys: Option<&mut PublicKeySet>, data: &mut Vec<u8>) -> Result<(), DataError> {
         data.push(REQUEST_FORMAT_VERSION); //version
         let mut body = Vec::new();
         match self {
@@ -929,13 +928,13 @@ impl BoardRequest {
         Ok(())
     }
 
-    pub fn new_into_data(&self, rng: impl OldCryptoRng + OldRngCore, keys: Option<&mut PublicKeySet>) -> Result<Vec<u8>, DataError> {
+    pub fn secure_into_data(&self, rng: impl OldCryptoRng + OldRngCore, keys: Option<&mut PublicKeySet>) -> Result<Vec<u8>, DataError> {
         let mut out = Vec::new();
-        self.new_extend_data(rng, keys, &mut out)?;
+        self.secure_extend_data(rng, keys, &mut out)?;
         Ok(out)
     }
 
-    pub fn new_from_data_iter<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(kem_dk: &DecapsulationKey, get_user_aead: F, data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> {
+    pub fn secure_from_data_iter<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(kem_dk: &DecapsulationKey, get_user_aead: F, data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> {
         if read_u8(data_iter)? != REQUEST_FORMAT_VERSION {return Err(DataError::UnsupportedVersion)}
         let mut user_id = None;
         let mut body = match read_u8(data_iter)? {
@@ -977,7 +976,7 @@ impl BoardRequest {
         })
     }
 
-    pub fn new_from_data<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(kem_dk: &DecapsulationKey, get_user_aead: F, data: &[u8]) -> Result<Self, DataError> {
-        Self::new_from_data_iter(kem_dk, get_user_aead, &mut data.into_iter().copied())
+    pub fn secure_from_data<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(kem_dk: &DecapsulationKey, get_user_aead: F, data: &[u8]) -> Result<Self, DataError> {
+        Self::secure_from_data_iter(kem_dk, get_user_aead, &mut data.into_iter().copied())
     }
 }

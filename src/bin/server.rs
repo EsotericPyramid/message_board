@@ -400,7 +400,7 @@ impl MessageBoard {
 
 struct Server {
     board: MessageBoard,
-    client_id_map: Arc<RwLock<HashMap<u64, TcpStream>>>,
+    client_id_map: RwLock<HashMap<u64, TcpStream>>,
     next_client_id: std::cell::Cell<u64>,
 }
 
@@ -408,7 +408,7 @@ impl Server {
     fn new(board: MessageBoard) -> Self {
         Server { 
             board, 
-            client_id_map: Arc::new(RwLock::new(HashMap::new())),
+            client_id_map: RwLock::new(HashMap::new()),
             next_client_id: std::cell::Cell::new(0),
         }
     }
