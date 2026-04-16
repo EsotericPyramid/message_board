@@ -576,6 +576,40 @@ impl AsData for UserData {
     }
 }
 
+pub struct PublicKeySet {
+    pub kem: EncapsulationKey,
+    pub user_aead: Option<UserAeadKey>,
+}
+
+impl AsData for PublicKeySet {
+    fn size_hint(&self) -> usize {
+        self.kem.size_hint() + 1 + if let Some(aead) = self.user_aead.as_ref() {aead.size_hint()} else {0}
+    }
+
+    fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> where Self: Sized {
+        let kem = EncapsulationKey::from_data_iter(data_iter)?;
+        let has_user_aead = read_u8(data_iter)? != 0;
+        let mut user_aead = None;
+        if has_user_aead {
+            let aead = UserAeadKey::from_data_iter(data_iter)?;
+            user_aead = Some(aead);
+        }
+        Ok(Self {
+            kem,
+            user_aead,
+        })
+    }
+
+    fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
+        self.kem.extend_data(data)?;
+        data.push(self.user_aead.is_some() as u8);
+        if let Some(aead) = self.user_aead.as_ref() {
+            aead.extend_data(data)?;
+        }
+        Ok(())
+    }
+}
+
 /// data format:
 ///     version (u8): 00
 ///     variant discriminant (u8) (listed with each variant)
@@ -695,160 +729,7 @@ impl AsData for BoardRequest {
     }
 }
 
-/// the response 
-#[derive(PartialEq, Eq, Debug)]
-pub enum BoardResponse {
-    GetEntry(Entry),
-    AddEntry(u64),
-    EditEntry,
-    GetUser(UserData),
-    AddUser(u64),
-}
-
-pub type MaybeBoardResponse = Result<BoardResponse, DataError>;
-
-/// data format:
-///     version (u8): 0
-///     variant discriminant (u8) (listed with each variant)
-/// 
-/// GetEntry, 0x00:
-///     - Entry Data -
-/// 
-/// AddEntry, 0x01:
-///     entry_id (u64)
-/// 
-/// EditEntry, 0x02:
-///     - no data -
-/// 
-/// GetUser, 0x20:
-///     - User Data -
-/// 
-/// AddUser, 0x21:
-///     user_id (u64)
-/// 
-/// Error, 0xff:
-///     - no data - 
-impl AsData for MaybeBoardResponse {
-    fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
-        data.push(RESPONSE_FORMAT_VERSION);
-        match self {
-            Ok(BoardResponse::GetEntry(entry)) => {
-                data.push(GET_ENTRY);
-                entry.extend_data(data)?;
-            }
-            Ok(BoardResponse::AddEntry(entry_id)) => {
-                data.push(ADD_ENTRY);
-                data.extend_from_slice(&entry_id.to_le_bytes());
-            }
-            Ok(BoardResponse::EditEntry) => {
-                data.push(EDIT_ENTRY);
-            }
-            Ok(BoardResponse::GetUser(user)) => {
-                data.push(GET_USER);
-                user.extend_data(data)?;
-            }
-            Ok(BoardResponse::AddUser(user_id)) => {
-                data.push(ADD_USER);
-                data.extend_from_slice(&user_id.to_le_bytes());
-            }
-            Err(e) => { // TODO: should consider the error
-                eprintln!("Sending Error: {:?}", e);
-                data.push(ERROR);
-            }
-        }
-        Ok(())
-    }
-
-    fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> where Self: Sized {
-        let version = read_u8(data_iter)?;
-        if version != 0 {return Err(DataError::UnsupportedVersion)}
-        Ok(match read_u8(data_iter)? {
-            // entry requests
-            GET_ENTRY => { // GetEntry
-                let entry = Entry::from_data_iter(data_iter)?;
-                Ok(BoardResponse::GetEntry(entry))
-            }
-            ADD_ENTRY => { // AddEntry
-                let entry_id = read_u64(data_iter)?;
-                Ok(BoardResponse::AddEntry(entry_id))
-            }
-            EDIT_ENTRY => Ok(BoardResponse::EditEntry),
-            // user requests
-            GET_USER => { // GetUser
-                let user = UserData::from_data_iter(data_iter)?;
-                Ok(BoardResponse::GetUser(user))
-            }
-            ADD_USER => { // AddUser
-                let user_id = read_u64(data_iter)?;
-                Ok(BoardResponse::AddUser(user_id))
-            }
-            ERROR => {
-                Err(internal_error!())
-            }
-            _ => {return Err(DataError::InvalidDiscriminant)}
-        })
-    }
-
-    fn size_hint(&self) -> usize {
-        match self {
-            Ok(BoardResponse::GetEntry(entry)) => {
-                1 + 1 + entry.size_hint()
-            }
-            Ok(BoardResponse::AddEntry(_)) => {
-                1 + 1 + 8
-            }
-            Ok(BoardResponse::EditEntry) => {
-                1 + 1
-            }
-            Ok(BoardResponse::GetUser(user)) => {
-                1 + 1 + user.size_hint()
-            }
-            Ok(BoardResponse::AddUser(_)) => {
-                1 + 1 + 8
-            }
-            Err(_) => {
-                1 + 1
-            }
-        }
-    }
-}
-
-pub struct PublicKeySet {
-    pub kem: EncapsulationKey,
-    pub user_aead: Option<UserAeadKey>,
-}
-
-impl AsData for PublicKeySet {
-    fn size_hint(&self) -> usize {
-        self.kem.size_hint() + 1 + if let Some(aead) = self.user_aead.as_ref() {aead.size_hint()} else {0}
-    }
-
-    fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> where Self: Sized {
-        let kem = EncapsulationKey::from_data_iter(data_iter)?;
-        let has_user_aead = read_u8(data_iter)? != 0;
-        let mut user_aead = None;
-        if has_user_aead {
-            let aead = UserAeadKey::from_data_iter(data_iter)?;
-            user_aead = Some(aead);
-        }
-        Ok(Self {
-            kem,
-            user_aead,
-        })
-    }
-
-    fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
-        self.kem.extend_data(data)?;
-        data.push(self.user_aead.is_some() as u8);
-        if let Some(aead) = self.user_aead.as_ref() {
-            aead.extend_data(data)?;
-        }
-        Ok(())
-    }
-}
-
-
-/// data format:
+/// secure data format:
 ///     version (u8): 00
 ///     kem header varient (u8): 
 ///     kem section: (will default to full anonymous when possible)
@@ -864,8 +745,6 @@ impl AsData for PublicKeySet {
 ///     aead section (or plaintext if the exposed kem variant):
 ///         variant discriminant (u8) (listed with each variant)
 ///         - variant specific data -
-/// 
-///     
 /// 
 /// GetEntry, 0x00 (user):
 ///     entry_id (u64)
@@ -978,5 +857,135 @@ impl BoardRequest {
 
     pub fn secure_from_data<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(kem_dk: &DecapsulationKey, get_user_aead: F, data: &[u8]) -> Result<Self, DataError> {
         Self::secure_from_data_iter(kem_dk, get_user_aead, &mut data.into_iter().copied())
+    }
+}
+
+/// the response 
+#[derive(PartialEq, Eq, Debug)]
+pub enum BoardResponse {
+    GetEntry(Entry),
+    AddEntry(u64),
+    EditEntry,
+
+    GetUser(UserData),
+    AddUser(u64),
+    
+    Error(DataError),
+}
+
+pub type MaybeBoardResponse = Result<BoardResponse, DataError>;
+
+impl BoardResponse {
+    pub fn encapsulate_error(val: MaybeBoardResponse) -> Self {
+        match val {
+            Err(e) => Self::Error(e),
+            Ok(v) => v
+        }
+    }
+}
+
+/// data format:
+///     version (u8): 0
+///     variant discriminant (u8) (listed with each variant)
+/// 
+/// GetEntry, 0x00:
+///     - Entry Data -
+/// 
+/// AddEntry, 0x01:
+///     entry_id (u64)
+/// 
+/// EditEntry, 0x02:
+///     - no data -
+/// 
+/// GetUser, 0x20:
+///     - User Data -
+/// 
+/// AddUser, 0x21:
+///     user_id (u64)
+/// 
+/// Error, 0xff:
+///     - no data - 
+impl AsData for BoardResponse {
+    fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
+        data.push(RESPONSE_FORMAT_VERSION);
+        match self {
+            BoardResponse::GetEntry(entry) => {
+                data.push(GET_ENTRY);
+                entry.extend_data(data)?;
+            }
+            BoardResponse::AddEntry(entry_id) => {
+                data.push(ADD_ENTRY);
+                data.extend_from_slice(&entry_id.to_le_bytes());
+            }
+            BoardResponse::EditEntry => {
+                data.push(EDIT_ENTRY);
+            }
+            BoardResponse::GetUser(user) => {
+                data.push(GET_USER);
+                user.extend_data(data)?;
+            }
+            BoardResponse::AddUser(user_id) => {
+                data.push(ADD_USER);
+                data.extend_from_slice(&user_id.to_le_bytes());
+            }
+            BoardResponse::Error(e) => { // TODO: should consider the error
+                eprintln!("Sending Error: {:?}", e);
+                data.push(ERROR);
+            }
+        }
+        Ok(())
+    }
+
+    fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> where Self: Sized {
+        let version = read_u8(data_iter)?;
+        if version != 0 {return Err(DataError::UnsupportedVersion)}
+        Ok(match read_u8(data_iter)? {
+            // entry requests
+            GET_ENTRY => { // GetEntry
+                let entry = Entry::from_data_iter(data_iter)?;
+                BoardResponse::GetEntry(entry)
+            }
+            ADD_ENTRY => { // AddEntry
+                let entry_id = read_u64(data_iter)?;
+                BoardResponse::AddEntry(entry_id)
+            }
+            EDIT_ENTRY => BoardResponse::EditEntry,
+            // user requests
+            GET_USER => { // GetUser
+                let user = UserData::from_data_iter(data_iter)?;
+                BoardResponse::GetUser(user)
+            }
+            ADD_USER => { // AddUser
+                let user_id = read_u64(data_iter)?;
+                BoardResponse::AddUser(user_id)
+            }
+            ERROR => {
+                BoardResponse::Error(internal_error!()) //not really an internal error, it just isn't encoded atm
+            }
+            _ => {return Err(DataError::InvalidDiscriminant)}
+        })
+    }
+
+    fn size_hint(&self) -> usize {
+        match self {
+            BoardResponse::GetEntry(entry) => {
+                1 + 1 + entry.size_hint()
+            }
+            BoardResponse::AddEntry(_) => {
+                1 + 1 + 8
+            }
+            BoardResponse::EditEntry => {
+                1 + 1
+            }
+            BoardResponse::GetUser(user) => {
+                1 + 1 + user.size_hint()
+            }
+            BoardResponse::AddUser(_) => {
+                1 + 1 + 8
+            }
+            BoardResponse::Error(_) => {
+                1 + 1
+            }
+        }
     }
 }

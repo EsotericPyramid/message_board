@@ -160,22 +160,25 @@ fn new_rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>,
     }
 }
 
-fn rand_response(mut rng: impl Rng, char_rng: impl Iterator<Item = char>) -> MaybeBoardResponse {
-    match rng.random_range(0..5) {
+fn rand_response(mut rng: impl Rng, char_rng: impl Iterator<Item = char>) -> BoardResponse {
+    match rng.random_range(0..6) {
         0 => {
-            Ok(BoardResponse::GetEntry(rand_entry(rng, char_rng)))
+            BoardResponse::GetEntry(rand_entry(rng, char_rng))
         }
         1 => {
-            Ok(BoardResponse::AddEntry(rng.next_u64()))
+            BoardResponse::AddEntry(rng.next_u64())
         }
         2 => {
-            Ok(BoardResponse::EditEntry)
+            BoardResponse::EditEntry
         }
         3 => {
-            Ok(BoardResponse::GetUser(rand_user(rng, char_rng)))
+            BoardResponse::GetUser(rand_user(rng, char_rng))
         }
         4 => {
-            Ok(BoardResponse::AddUser(rng.next_u64()))
+            BoardResponse::AddUser(rng.next_u64())
+        }
+        5 => {
+            BoardResponse::Error(internal_error!())
         }
         _ => panic!("Request Type should be in range")
     }
@@ -247,7 +250,11 @@ fn response_data_conversion() {
     let mut char_rng = get_char_rng(rng.clone());
     for _ in 0..RANDOM_TEST_RETRIES {
         let response = rand_response(&mut rng, &mut char_rng);
-        assert_eq!(response, MaybeBoardResponse::from_data(&MaybeBoardResponse::into_data(&response).unwrap()).unwrap(), "Invalid Request Conversion");
+        if let BoardResponse::Error(_) = response {
+            let BoardResponse::Error(_) = BoardResponse::from_data(&response.into_data().unwrap()).unwrap() else {panic!("Invalid Request Conversion (Err)")};
+        } else {
+            assert_eq!(response, BoardResponse::from_data(&response.into_data().unwrap()).unwrap(), "Invalid Request Conversion");
+        }
     }
 }
 

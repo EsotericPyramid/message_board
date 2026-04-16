@@ -102,7 +102,7 @@ impl MessageBoardConnection {
         board
     }
 
-    fn send_request(&mut self, request: BoardRequest) -> Result<MaybeBoardResponse, DataError> {
+    fn send_request(&mut self, request: BoardRequest) -> Result<BoardResponse, DataError> {
         let request = request.into_data()?;
         let _ = self.stream.write_all(&(request.len() as u64).to_le_bytes());
         let _ = self.stream.write_all(&request);
@@ -111,26 +111,26 @@ impl MessageBoardConnection {
         let num_bytes = u64::from_le_bytes(num_bytes) as usize;
         let mut buffer = vec![0; num_bytes];
         let _ = self.stream.read_exact(&mut buffer);
-        MaybeBoardResponse::from_data(&buffer)
+        BoardResponse::from_data(&buffer)
     }
 
     pub fn get_entry(&mut self, entry_id: u64) -> Result<Entry, DataError> {
         let request = BoardRequest::GetEntry { user_id: self.user_id.unwrap(), entry_id };
-        let response = self.send_request(request)??;
+        let response = self.send_request(request)?;
         let BoardResponse::GetEntry(entry) = response else {return Err(internal_error!())};
         Ok(entry)
     }
 
     pub fn write_entry(&mut self, entry: Entry) -> Result<u64, DataError> {
         let request = BoardRequest::AddEntry { user_id: self.user_id.unwrap(), entry };
-        let response = self.send_request(request)??;
+        let response = self.send_request(request)?;
         let BoardResponse::AddEntry(entry_id) = response else {return Err(internal_error!())};
         Ok(entry_id)
     }
 
     pub fn edit_entry(&mut self, entry_id: u64, entry: Entry) -> Result<(), DataError> {
         let request = BoardRequest::EditEntry { user_id: self.user_id.unwrap(), entry_id, entry };
-        let response = self.send_request(request)??;
+        let response = self.send_request(request)?;
         let BoardResponse::EditEntry = response else {return Err(internal_error!())};
         Ok(())
     }
@@ -138,7 +138,7 @@ impl MessageBoardConnection {
 
     pub fn get_user(&mut self, user_id: u64) -> Result<UserData, DataError> {
         let request = BoardRequest::GetUser { user_id };
-        let response = self.send_request(request)??;
+        let response = self.send_request(request)?;
         let BoardResponse::GetUser(user) = response else {return Err(internal_error!())};
         Ok(user)
     }
@@ -146,7 +146,7 @@ impl MessageBoardConnection {
     pub fn create_user(&mut self) -> Result<bool, DataError> {
         //if let Some(_) = self.user_id {return Ok(false)}
         let request = BoardRequest::AddUser;
-        let response = self.send_request(request)??;
+        let response = self.send_request(request)?;
         let BoardResponse::AddUser(user_id) = response else {return Err(internal_error!())};
         self.user_id = Some(user_id);
         edit_config(|config| config.user_id = Some(user_id));
