@@ -120,6 +120,7 @@ pub fn get_full_rand_crypto_rng(mut rng: impl OldCryptoRng + OldRngCore) -> Cryp
 pub const fn get_sys_rng() -> OldSysRng {rand_chacha::rand_core::OsRng}
 
 /// security note: this key *does not use nonces* and as such shouldn't be used to repeated encryption / decryption, use UserAeadKey for that
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SimpleAeadKey {
     key: RawAeadKey,
 }
@@ -206,8 +207,6 @@ impl UserAeadKey {
     }
 
     pub fn decrypt(&mut self, nonce: u128, to_decrypt: &[u8], associated: &[u8]) -> Result<Vec<u8>, DataError> {
-        println!("nonce: {}, head: {}, old_nonces: {:?}", nonce, self.nonce_rng.get_word_pos(), self.old_nonces);
-
         fn inner(key: &UserAeadKey, raw_nonce: RawAeadNonce, payload: aead::Payload<'_, '_>) -> Result<Vec<u8>, DataError> {
             let aead = RawAead::new(&key.key);
             let result = aead.decrypt(&raw_nonce.into(), payload);
@@ -392,7 +391,7 @@ pub fn read_from_exposed_block(input_stream: &mut impl Iterator<Item = u8>) -> R
     Ok(input_stream.take(len as usize))
 }
 
-pub fn extend_with_full_anonymous_block(rng: impl OldCryptoRng + OldRngCore, keys: &mut PublicKeySet, output_stream: &mut Vec<u8>, to_encrypt: &[u8]) -> Result<(), DataError> {
+pub fn extend_with_full_anonymous_block(rng: impl OldCryptoRng + OldRngCore, keys: &mut PublicKeySet, output_stream: &mut Vec<u8>, to_encrypt: &[u8]) -> Result<SimpleAeadKey, DataError> {
     let (kem_ct, kem_sk) = keys.kem.raw_encapsulate(rng)?;
     let mut aead_key: [u8; _] = [0; _];
     for i in 0..aead_key.len() {
@@ -405,10 +404,10 @@ pub fn extend_with_full_anonymous_block(rng: impl OldCryptoRng + OldRngCore, key
     bounded_usize!(aead_ct.len(), u64)?;
     output_stream.extend_from_slice(&(aead_ct.len() as u64).to_le_bytes());
     output_stream.extend_from_slice(&aead_ct);
-    Ok(())
+    Ok(aead)
 }
 
-pub fn read_from_full_anonymous_block(kem_dk: &DecapsulationKey, input_stream: &mut impl Iterator<Item = u8>) -> Result<Vec<u8>, DataError> {
+pub fn read_from_full_anonymous_block(kem_dk: &DecapsulationKey, input_stream: &mut impl Iterator<Item = u8>) -> Result<(SimpleAeadKey, Vec<u8>), DataError> {
     let mut kem_ct: RawKemCipherText = [0u8; _].into();
     kem_ct = input_stream.take(kem_ct.len()).collect();
     let kem_sk = kem_dk.raw_decapsulate(kem_ct)?;
@@ -420,7 +419,7 @@ pub fn read_from_full_anonymous_block(kem_dk: &DecapsulationKey, input_stream: &
 
     let aead_len = read_u64(input_stream)? as usize;
     let aead_pt = aead.decrypt(&input_stream.take(aead_len).collect::<Vec<_>>(), &[])?;
-    Ok(aead_pt)
+    Ok((aead, aead_pt))
 }
 
 pub fn extend_with_user_block(mut rng: impl OldCryptoRng + OldRngCore, keys: &mut PublicKeySet, user_id: u64, output_stream: &mut Vec<u8>, to_encrypt: &[u8]) -> Result<(), DataError> {
@@ -450,6 +449,25 @@ pub fn read_from_user_block<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(k
     Ok((user_id, aead_pt))
 }
 
+pub fn extend_with_full_anonymous_response_block(key: &SimpleAeadKey, output_stream: &mut Vec<u8>, to_encrypt: &[u8]) -> Result<(), DataError> {
+    let ct = key.encrypt(to_encrypt, &[])?;
+    bounded_usize!(ct.len(), u64)?;
+    output_stream.extend_from_slice(&(ct.len() as u64).to_le_bytes());
+    output_stream.extend_from_slice(&ct);
+    Ok(())
+}
+
+pub fn read_from_full_anonymous_response_block<'a>(keys: impl Iterator<Item = &'a SimpleAeadKey>, input_stream: &mut impl Iterator<Item = u8>) -> Result<(&'a SimpleAeadKey, Vec<u8>), DataError> {
+    let len = read_u64(input_stream)?;
+    let ct = input_stream.take(len as usize).collect::<Vec<_>>();
+    for key in keys {
+        if let Ok(pt) = key.decrypt(&ct, &[]) {
+            return Ok((key, pt));
+        }
+    }
+    return Err(DataError::MissingKey);
+}
+
 pub fn extend_with_user_response_block(mut rng: impl OldCryptoRng + OldRngCore, key: &mut UserAeadKey, output_stream: &mut Vec<u8>, to_encrypt: &[u8]) -> Result<(), DataError> {
     let simple_key = key.derive_simple_key();
     let (mut nonce, body_ct) = key.encrypt(to_encrypt, &[])?;
@@ -470,7 +488,7 @@ pub fn read_from_user_response_block(key: &mut UserAeadKey, input_stream: &mut i
 
     let header_ct_len = read_u16(input_stream)?;
     let header_ct = input_stream.take(header_ct_len as usize).collect::<Vec<_>>();
-    let nonce: [u8; 16] = simple_key.decrypt(&header_ct, &[])?.try_into().map_err(|x| internal_error!())?;
+    let nonce: [u8; 16] = simple_key.decrypt(&header_ct, &[])?.try_into().map_err(|_| internal_error!())?;
     let nonce = u128::from_le_bytes(nonce) % AEAD_NONCE_MOD;
 
     let body_ct_len = read_u64(input_stream)?;

@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::string::FromUtf8Error;
 
 use crate::cryptography::*;
@@ -29,10 +30,10 @@ pub const ADD_ENTRY: u8 = 0x01;
 pub const EDIT_ENTRY: u8 = 0x02;
 pub const GET_USER: u8 = 0x20;
 pub const ADD_USER: u8 = 0x21;
-/// Kem encrypted variants
-pub const KEM_EXPOSED: u8 = 0x00;
-pub const KEM_FULL_ANON: u8 = 0x01;
-pub const KEM_USER: u8 = 0x02;
+/// encrypted variants
+pub const EXPOSED: u8 = 0x00;
+pub const FULL_ANON: u8 = 0x01;
+pub const USER: u8 = 0x02;
 
 /// access group
 pub const INHERIT_BASE: u8 = 0x00;
@@ -578,7 +579,14 @@ impl AsData for UserData {
 
 pub struct PublicKeySet {
     pub kem: EncapsulationKey,
+    pub simple_aead: VecDeque<SimpleAeadKey>, // not stored in data
     pub user_aead: Option<UserAeadKey>,
+}
+
+impl PublicKeySet {
+    pub fn new(kem: EncapsulationKey, user_aead: Option<UserAeadKey>) -> Self {
+        Self { kem, simple_aead: VecDeque::new(), user_aead }
+    } 
 }
 
 impl AsData for PublicKeySet {
@@ -594,10 +602,7 @@ impl AsData for PublicKeySet {
             let aead = UserAeadKey::from_data_iter(data_iter)?;
             user_aead = Some(aead);
         }
-        Ok(Self {
-            kem,
-            user_aead,
-        })
+        Ok(Self::new(kem, user_aead))
     }
 
     fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
@@ -608,6 +613,12 @@ impl AsData for PublicKeySet {
         }
         Ok(())
     }
+}
+
+pub enum ReEncryptionData {
+    Exposed,
+    FullAnonymous(SimpleAeadKey),
+    User(u64),
 }
 
 /// data format:
@@ -791,15 +802,16 @@ impl BoardRequest {
         match self {
             BoardRequest::GetEntry { user_id, .. } | BoardRequest::AddEntry { user_id, ..} | BoardRequest::EditEntry { user_id, .. } => {
                 let Some(keys) = keys else {return Err(DataError::MissingKey)};
-                data.push(KEM_USER);
+                data.push(USER);
                 extend_with_user_block(rng, keys, *user_id, data, &mut body)?;
             }
             BoardRequest::GetUser { .. } | BoardRequest::AddUser { .. } => {
                 if let Some(keys) = keys {
-                    data.push(KEM_FULL_ANON);
-                    extend_with_full_anonymous_block(rng, keys, data, &mut body)?;
+                    data.push(FULL_ANON);
+                    let simple_aead = extend_with_full_anonymous_block(rng, keys, data, &mut body)?;
+                    keys.simple_aead.push_back(simple_aead);
                 } else {
-                    data.push(KEM_EXPOSED);
+                    data.push(EXPOSED);
                     extend_with_exposed_block(data, &mut body)?;
                 }
             }
@@ -813,21 +825,28 @@ impl BoardRequest {
         Ok(out)
     }
 
-    pub fn secure_from_data_iter<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(kem_dk: &DecapsulationKey, get_user_aead: F, data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> {
+    pub fn secure_from_data_iter<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(kem_dk: &DecapsulationKey, get_user_aead: F, data_iter: &mut impl Iterator<Item = u8>) -> Result<(ReEncryptionData, Self), DataError> {
         if read_u8(data_iter)? != REQUEST_FORMAT_VERSION {return Err(DataError::UnsupportedVersion)}
         let mut user_id = None;
-        let mut body = match read_u8(data_iter)? {
-            KEM_EXPOSED => read_from_exposed_block(data_iter)?.collect(),
-            KEM_FULL_ANON => read_from_full_anonymous_block(kem_dk, data_iter)?,
-            KEM_USER => {
+        let (re_encryptor, body) = match read_u8(data_iter)? {
+            EXPOSED => {
+                let body = read_from_exposed_block(data_iter)?.collect();
+                (ReEncryptionData::Exposed, body)
+            },
+            FULL_ANON => {
+                let (data, body) = read_from_full_anonymous_block(kem_dk, data_iter)?;
+                (ReEncryptionData::FullAnonymous(data), body)
+            },
+            USER => {
                 let (user, body) = read_from_user_block(kem_dk, data_iter, get_user_aead)?;
                 user_id = Some(user);
-                body
+                (ReEncryptionData::User(user), body)
             }
             _ => {return Err(DataError::InvalidDiscriminant)}
-        }.into_iter();
+        };
+        let mut body = body.into_iter();
         let discriminant = read_u8(&mut body)?;
-        Ok(match discriminant {
+        Ok((re_encryptor, match discriminant {
             // entry requests
             GET_ENTRY => { // GetEntry
                 let entry_id = read_u64(&mut body)?;
@@ -852,10 +871,10 @@ impl BoardRequest {
             }
             
             _ => {return Err(DataError::InvalidDiscriminant)}
-        })
+        }))
     }
 
-    pub fn secure_from_data<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(kem_dk: &DecapsulationKey, get_user_aead: F, data: &[u8]) -> Result<Self, DataError> {
+    pub fn secure_from_data<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(kem_dk: &DecapsulationKey, get_user_aead: F, data: &[u8]) -> Result<(ReEncryptionData, Self), DataError> {
         Self::secure_from_data_iter(kem_dk, get_user_aead, &mut data.into_iter().copied())
     }
 }
@@ -987,5 +1006,140 @@ impl AsData for BoardResponse {
                 1 + 1
             }
         }
+    }
+}
+
+/// secure data format:
+///     version (u8): 0
+///     encryption discriminant:
+///     encrypted body
+/// 
+/// Body:
+///     variant discriminant (u8) (listed with each variant)
+///     - variant data - 
+/// 
+/// GetEntry, 0x00:
+///     - Entry Data -
+/// 
+/// AddEntry, 0x01:
+///     entry_id (u64)
+/// 
+/// EditEntry, 0x02:
+///     - no data -
+/// 
+/// GetUser, 0x20:
+///     - User Data -
+/// 
+/// AddUser, 0x21:
+///     user_id (u64)
+/// 
+/// Error, 0xff:
+///     - no data - 
+impl BoardResponse {
+    pub fn secure_extend_data<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(&self, rng: impl OldCryptoRng + OldRngCore, re_encryptor: ReEncryptionData, data: &mut Vec<u8>, get_user_aead: F) -> Result<(), DataError> {
+        data.push(RESPONSE_FORMAT_VERSION);
+        let mut body = Vec::new();
+        match self {
+            BoardResponse::GetEntry(entry) => {
+                body.push(GET_ENTRY);
+                entry.extend_data(&mut body)?;
+            }
+            BoardResponse::AddEntry(entry_id) => {
+                body.push(ADD_ENTRY);
+                body.extend_from_slice(&entry_id.to_le_bytes());
+            }
+            BoardResponse::EditEntry => {
+                body.push(EDIT_ENTRY);
+            }
+            BoardResponse::GetUser(user) => {
+                body.push(GET_USER);
+                user.extend_data(&mut body)?;
+            }
+            BoardResponse::AddUser(user_id) => {
+                body.push(ADD_USER);
+                body.extend_from_slice(&user_id.to_le_bytes());
+            }
+            BoardResponse::Error(e) => { // TODO: should consider the error
+                eprintln!("Sending Error: {:?}", e);
+                body.push(ERROR);
+            }
+        }
+        match re_encryptor {
+            ReEncryptionData::Exposed => {
+                data.push(EXPOSED);
+                extend_with_exposed_block(data, &body)?;
+            }
+            ReEncryptionData::FullAnonymous(key) => {
+                data.push(FULL_ANON);
+                extend_with_full_anonymous_response_block(&key, data, &body)?;
+            }
+            ReEncryptionData::User(user_id) => {
+                data.push(USER);
+                let aead = get_user_aead(user_id).map_or(Err(DataError::MissingKey), |x| Ok(x))?;
+                extend_with_user_response_block(rng, aead, data, &body)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn secure_into_data<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(&self, rng: impl OldCryptoRng + OldRngCore, re_encryptor: ReEncryptionData, get_user_aead: F) -> Result<Vec<u8>, DataError> {
+        let mut out = Vec::new();
+        self.secure_extend_data(rng, re_encryptor, &mut out, get_user_aead)?;
+        Ok(out)
+    }
+
+    pub fn secure_from_data_iter(data_iter: &mut impl Iterator<Item = u8>, keys: Option<&mut PublicKeySet>) -> Result<Self, DataError> {
+        let version = read_u8(data_iter)?;
+        if version != 0 {return Err(DataError::UnsupportedVersion)}
+        let mut body = match read_u8(data_iter)? {
+            EXPOSED => {
+                read_from_exposed_block(data_iter)?.collect::<Vec<_>>()
+            }
+            FULL_ANON => {
+                let Some(keys) = keys else {return Err(DataError::MissingKey)};
+                let (true_key, body) = read_from_full_anonymous_response_block(keys.simple_aead.iter(), data_iter)?;
+                let mut true_key_idx = 0;
+                for (key_idx, key) in keys.simple_aead.iter().enumerate() {
+                    if key == true_key {true_key_idx = key_idx; break;}
+                }
+                keys.simple_aead.remove(true_key_idx);
+                body
+            }
+            USER => {
+                let Some(keys) = keys else {return Err(DataError::MissingKey)};
+                let Some(user_aead) = &mut keys.user_aead else {return Err(DataError::MissingKey)};
+                read_from_user_response_block(user_aead, data_iter)?
+            }
+            _ => {return Err(DataError::InvalidDiscriminant)}
+        }.into_iter();
+        Ok(match read_u8(&mut body)? {
+            // entry requests
+            GET_ENTRY => { // GetEntry
+                let entry = Entry::from_data_iter(&mut body)?;
+                BoardResponse::GetEntry(entry)
+            }
+            ADD_ENTRY => { // AddEntry
+                let entry_id = read_u64(&mut body)?;
+                BoardResponse::AddEntry(entry_id)
+            }
+            EDIT_ENTRY => BoardResponse::EditEntry,
+            // user requests
+            GET_USER => { // GetUser
+                let user = UserData::from_data_iter(&mut body)?;
+                BoardResponse::GetUser(user)
+            }
+            ADD_USER => { // AddUser
+                let user_id = read_u64(&mut body)?;
+                BoardResponse::AddUser(user_id)
+            }
+            ERROR => {
+                BoardResponse::Error(internal_error!()) //not really an internal error, it just isn't encoded atm
+            }
+            _ => {return Err(DataError::InvalidDiscriminant)}
+        })
+    }
+
+    pub fn secure_from_data(data: &[u8], keys: Option<&mut PublicKeySet>) -> Result<Self, DataError> {
+        Self::secure_from_data_iter(&mut data.iter().copied(), keys)
     }
 }
