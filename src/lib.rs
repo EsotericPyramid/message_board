@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::ops::{Deref, DerefMut};
 use std::string::FromUtf8Error;
 
 use crate::cryptography::*;
@@ -65,6 +66,7 @@ pub trait AsData {
     fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> where Self: Sized;
 
     fn size_hint(&self) -> usize {0}
+    fn sanitize(&mut self) {}
 
     fn into_data(&self) -> Result<Vec<u8>, DataError> {
         let mut out= Vec::with_capacity(self.size_hint());
@@ -527,13 +529,15 @@ impl EntryVariant {
 
 #[derive(PartialEq, Eq, Debug)]
 pub struct UserData {
+    pub aead: UserAeadKey,
     pub entry_ids: Vec<u64>,
 }
 
 impl UserData {
-    pub fn new_empty() -> Self {
+    pub fn new_empty(key: UserAeadKey) -> Self {
         UserData { 
-            entry_ids: Vec::new() 
+            aead: key,
+            entry_ids: Vec::new() ,
         }
     }
 }
@@ -543,6 +547,7 @@ impl UserData {
 /// data format, numbers are little endian:
 ///     magic number (u16): see `USER_MAGIC_NUMBER`
 ///     version number (u8)
+///     - UserAeadKey data - 
 ///     number of entry ids (u32),
 ///     entry id 1 (u64),
 ///     ...
@@ -553,12 +558,14 @@ impl AsData for UserData {
         if magic_number != USER_MAGIC_NUMBER {return Err(DataError::IncorrectMagicNum)};
         let version = read_u8(data_iter)?;
         if version != 0 {return Err(DataError::UnsupportedVersion)};
+        let aead = UserAeadKey::from_data_iter(data_iter)?;
         let num_entries = read_u32(data_iter)? as usize;
         let mut entry_ids = Vec::with_capacity(num_entries);
         for _ in 0..num_entries {
             entry_ids.push(read_u64(data_iter)?);
         }
         Ok(UserData { 
+            aead,
             entry_ids
         })
     }
@@ -566,6 +573,7 @@ impl AsData for UserData {
     fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
         data.extend_from_slice(&USER_MAGIC_NUMBER.to_le_bytes());
         data.push(USER_FILE_VERSION);
+        self.aead.extend_data(data)?;
         bounded_usize!(self.entry_ids.len(), u32)?;
         data.extend_from_slice(&(self.entry_ids.len() as u32).to_le_bytes());
         data.extend(self.entry_ids.iter().flat_map(|x| x.to_le_bytes()));
@@ -574,6 +582,9 @@ impl AsData for UserData {
 
     fn size_hint(&self) -> usize {
         2 + 1 + 4 + self.entry_ids.len() * 8
+    }
+    fn sanitize(&mut self) {
+        self.aead.sanitize();
     }
 }
 
@@ -825,7 +836,7 @@ impl BoardRequest {
         Ok(out)
     }
 
-    pub fn secure_from_data_iter<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(kem_dk: &DecapsulationKey, get_user_aead: F, data_iter: &mut impl Iterator<Item = u8>) -> Result<(ReEncryptionData, Self), DataError> {
+    pub fn secure_from_data_iter<'a, F: FnOnce(u64) -> Option<T>, T: Deref<Target = UserAeadKey> + DerefMut>(kem_dk: &DecapsulationKey, get_user_aead: F, data_iter: &mut impl Iterator<Item = u8>) -> Result<(ReEncryptionData, Self), DataError> {
         if read_u8(data_iter)? != REQUEST_FORMAT_VERSION {return Err(DataError::UnsupportedVersion)}
         let mut user_id = None;
         let (re_encryptor, body) = match read_u8(data_iter)? {
@@ -874,7 +885,7 @@ impl BoardRequest {
         }))
     }
 
-    pub fn secure_from_data<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(kem_dk: &DecapsulationKey, get_user_aead: F, data: &[u8]) -> Result<(ReEncryptionData, Self), DataError> {
+    pub fn secure_from_data<'a, F: FnOnce(u64) -> Option<T>, T: Deref<Target = UserAeadKey> + DerefMut>(kem_dk: &DecapsulationKey, get_user_aead: F, data: &[u8]) -> Result<(ReEncryptionData, Self), DataError> {
         Self::secure_from_data_iter(kem_dk, get_user_aead, &mut data.into_iter().copied())
     }
 }
@@ -1036,7 +1047,7 @@ impl AsData for BoardResponse {
 /// Error, 0xff:
 ///     - no data - 
 impl BoardResponse {
-    pub fn secure_extend_data<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(&self, rng: impl OldCryptoRng + OldRngCore, re_encryptor: ReEncryptionData, data: &mut Vec<u8>, get_user_aead: F) -> Result<(), DataError> {
+    pub fn secure_extend_data<'a, F: FnOnce(u64) -> Option<T>, T: Deref<Target = UserAeadKey> + DerefMut>(&self, rng: impl OldCryptoRng + OldRngCore, re_encryptor: ReEncryptionData, data: &mut Vec<u8>, get_user_aead: F) -> Result<(), DataError> {
         data.push(RESPONSE_FORMAT_VERSION);
         let mut body = Vec::new();
         match self {
@@ -1075,14 +1086,14 @@ impl BoardResponse {
             }
             ReEncryptionData::User(user_id) => {
                 data.push(USER);
-                let aead = get_user_aead(user_id).map_or(Err(DataError::MissingKey), |x| Ok(x))?;
-                extend_with_user_response_block(rng, aead, data, &body)?;
+                let mut aead = get_user_aead(user_id).map_or(Err(DataError::MissingKey), |x| Ok(x))?;
+                extend_with_user_response_block(rng, &mut *aead, data, &body)?;
             }
         }
         Ok(())
     }
 
-    pub fn secure_into_data<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(&self, rng: impl OldCryptoRng + OldRngCore, re_encryptor: ReEncryptionData, get_user_aead: F) -> Result<Vec<u8>, DataError> {
+    pub fn secure_into_data<'a, F: FnOnce(u64) -> Option<T>, T: Deref<Target = UserAeadKey> + DerefMut>(&self, rng: impl OldCryptoRng + OldRngCore, re_encryptor: ReEncryptionData, get_user_aead: F) -> Result<Vec<u8>, DataError> {
         let mut out = Vec::new();
         self.secure_extend_data(rng, re_encryptor, &mut out, get_user_aead)?;
         Ok(out)

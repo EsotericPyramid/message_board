@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 
 use rand::distr::uniform::SampleRange;
 use rand::seq::SliceRandom;
@@ -101,13 +100,16 @@ fn rand_entry(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>) -> En
     entry
 }
 
-fn rand_user(mut rng: impl Rng, _char_rng: impl Iterator<Item = char>) -> UserData {
+fn rand_user(mut rng: impl Rng, crypto_rng: impl OldCryptoRng + OldRngCore) -> UserData {
     let mut entry_ids = Vec::new();
     for _ in 0..rng.random_range(1..100) {
         entry_ids.push(rng.next_u64());
     }
-
-    let user = UserData { entry_ids };
+    let aead = UserAeadKey::new_random(crypto_rng);
+    let user = UserData { 
+        aead,
+        entry_ids
+    };
     user
 }
 
@@ -166,7 +168,7 @@ fn new_rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>,
     }
 }
 
-fn rand_response(mut rng: impl Rng, char_rng: impl Iterator<Item = char>) -> BoardResponse {
+fn rand_response(mut rng: impl Rng, char_rng: impl Iterator<Item = char>, crypto_rng: impl OldCryptoRng + OldRngCore) -> BoardResponse {
     match rng.random_range(0..6) {
         0 => {
             BoardResponse::GetEntry(rand_entry(rng, char_rng))
@@ -178,7 +180,7 @@ fn rand_response(mut rng: impl Rng, char_rng: impl Iterator<Item = char>) -> Boa
             BoardResponse::EditEntry
         }
         3 => {
-            BoardResponse::GetUser(rand_user(rng, char_rng))
+            BoardResponse::GetUser(rand_user(rng, crypto_rng))
         }
         4 => {
             BoardResponse::AddUser(rng.next_u64())
@@ -222,9 +224,9 @@ fn entry_size_hint() {
 #[test]
 fn user_data_conversion() {
     let mut rng = rand::rng();
-    let mut char_rng = get_char_rng(rng.clone());
+    let mut crypto_rng = get_crypto_rng();
     for _ in 0..RANDOM_TEST_RETRIES {
-        let user = rand_user(&mut rng, &mut char_rng);
+        let user = rand_user(&mut rng, &mut crypto_rng);
         assert_eq!(user, UserData::from_data(&user.into_data().unwrap()).unwrap(), "Invalid User Conversion");
     }
 }
@@ -232,9 +234,9 @@ fn user_data_conversion() {
 #[test]
 fn user_size_hint() {
     let mut rng = rand::rng();
-    let mut char_rng = get_char_rng(rng.clone());
+    let mut crypto_rng = get_crypto_rng();
     for _ in 0..RANDOM_TEST_RETRIES {
-        let user = rand_user(&mut rng, &mut char_rng);
+        let user = rand_user(&mut rng, &mut crypto_rng);
         assert_eq!(user.size_hint(), user.into_data().unwrap().len(), "Incorrect size hint");
     }
 }
@@ -263,8 +265,9 @@ fn request_size_hint() {
 fn response_data_conversion() {
     let mut rng = rand::rng();
     let mut char_rng = get_char_rng(rng.clone());
+    let mut crypto_rng = get_crypto_rng();
     for _ in 0..RANDOM_TEST_RETRIES {
-        let response = rand_response(&mut rng, &mut char_rng);
+        let response = rand_response(&mut rng, &mut char_rng, &mut crypto_rng);
         if let BoardResponse::Error(_) = response {
             let BoardResponse::Error(_) = BoardResponse::from_data(&response.into_data().unwrap()).unwrap() else {panic!("Invalid Request Conversion (Err)")};
         } else {
@@ -277,8 +280,9 @@ fn response_data_conversion() {
 fn response_size_hint() {
     let mut rng = rand::rng();
     let mut char_rng = get_char_rng(rng.clone());
+    let mut crypto_rng = get_crypto_rng();
     for _ in 0..RANDOM_TEST_RETRIES {
-        let response = rand_response(&mut rng, &mut char_rng);
+        let response = rand_response(&mut rng, &mut char_rng, &mut crypto_rng);
         assert_eq!(response.size_hint(), response.into_data().unwrap().len(), "Incorrect size hint");
     }
 }
@@ -465,7 +469,7 @@ fn secure_board_response_data_conversion() {
     let mut user_key = PublicKeySet::new(kem_ek, Some(users_user_aead_key));
 
     for _ in 0..RANDOM_TEST_RETRIES {
-        let response = rand_response(&mut rng, &mut char_rng);
+        let response = rand_response(&mut rng, &mut char_rng, &mut crypto_rng);
         let re_encryptor = rand_re_encryptor(&mut rng, &mut crypto_rng, user_id);
         if let ReEncryptionData::FullAnonymous(key) = &re_encryptor {
             user_key.simple_aead.push_back(key.clone()); // this has to be artificial since it would normally be done when the request leading to this response was sent

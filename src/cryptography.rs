@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-
+use std::ops::{Deref, DerefMut};
 use aes_gcm::{KeyInit, KeySizeUser};
 use ml_kem::array::AssocArraySize;
 use aes_gcm::aead::{self, Aead};
@@ -265,6 +265,11 @@ impl UserAeadKey {
 
 impl AsData for UserAeadKey {
     fn size_hint(&self) -> usize {self.key.size_hint() + self.nonce_rng.size_hint()}
+    fn sanitize(&mut self) {
+        self.key = [0; _].into();
+        self.nonce_rng = CryptoRng::from_seed([0; _]);
+        self.old_nonces.clear();
+    }
     fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> where Self: Sized {
         let key = RawAeadKey::from_data_iter(data_iter)?;
         let nonce_rng = CryptoRng::from_data_iter(data_iter)?;
@@ -438,14 +443,14 @@ pub fn extend_with_user_block(mut rng: impl OldCryptoRng + OldRngCore, keys: &mu
     Ok(())
 }
 
-pub fn read_from_user_block<'a, F: FnOnce(u64) -> Option<&'a mut UserAeadKey>>(kem_dk: &DecapsulationKey, input_stream: &mut impl Iterator<Item = u8>, get_user_aead: F) -> Result<(u64, Vec<u8>), DataError> {
+pub fn read_from_user_block<'a, F: FnOnce(u64) -> Option<T>, T: Deref<Target = UserAeadKey> + DerefMut>(kem_dk: &DecapsulationKey, input_stream: &mut impl Iterator<Item = u8>, get_user_aead: F) -> Result<(u64, Vec<u8>), DataError> {
     let kem_ct = KemCipherText::from_data_iter(input_stream)?;
     let mut packed_kem_sk = kem_dk.decapsulate(kem_ct, 8 + 16)?;
     let user_id = read_u64(&mut packed_kem_sk)?;
     let nonce = read_u128(&mut packed_kem_sk)? & AEAD_NONCE_MAX;
-    let aead = get_user_aead(user_id).map_or(Err(DataError::MissingKey), |x| Ok(x))?;
+    let mut aead = get_user_aead(user_id).map_or(Err(DataError::MissingKey), |x| Ok(x))?;
     let aead_len = read_u64(input_stream)? as usize;
-    let aead_pt = aead.decrypt(nonce, &input_stream.take(aead_len).collect::<Vec<_>>(), &[])?;
+    let aead_pt = (*aead).decrypt(nonce, &input_stream.take(aead_len).collect::<Vec<_>>(), &[])?;
     Ok((user_id, aead_pt))
 }
 

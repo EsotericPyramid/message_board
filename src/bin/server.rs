@@ -1,3 +1,4 @@
+use message_board::cryptography::{get_crypto_rng, DecapsulationKey, EncapsulationKey, UserAeadKey};
 use message_board::*;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read, Write};
@@ -5,10 +6,13 @@ use std::net::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use std::time::{Instant, Duration};
 use rand::Rng;
 use message_board::utils::*;
+// this is the 0.6.4 version, vs the 0.10.0 version from the rand crate
+use rand_chacha::rand_core::RngCore as OldRngCore;
+use rand_chacha::rand_core::CryptoRng as OldCryptoRng; 
 
 /// extended off of the user home
 const RC_FILE: &str = ".config/message_board/server_rc.toml";
@@ -23,7 +27,34 @@ const SERVER_RESERVED_USER_IDS: [u64; 2] = [SERVER_USER_ID, ADMIN_USER_ID];
 
 const SERVER_MAINLOOP_PERIOD: Duration = Duration::new(0, 1000000); // ie. 1 ms
 
+struct StorageFile {
+    kem_ek: EncapsulationKey,
+    kem_dk: DecapsulationKey,
+}
 
+struct GuardedUserAeadKey<'a> {
+    board: &'a MessageBoard,
+    user_id: u64,
+    key: UserAeadKey,
+}
+
+impl<'a> std::ops::Deref for GuardedUserAeadKey<'a> {
+    type Target = UserAeadKey;
+
+    fn deref(&self) -> &Self::Target {&self.key}
+}
+
+impl<'a> std::ops::DerefMut for GuardedUserAeadKey<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.key}
+}
+
+impl<'a> Drop for GuardedUserAeadKey<'a> {
+    fn drop(&mut self) {
+        let mut user = self.board.get_user(self.user_id).unwrap();
+        user.aead = self.key.clone();
+        self.board.overwrite_user_data(self.user_id, user).unwrap();
+    }
+}
 
 /// file format:
 /// 
@@ -33,6 +64,10 @@ const SERVER_MAINLOOP_PERIOD: Duration = Duration::new(0, 1000000); // ie. 1 ms
 ///     path: file containing the path for the main file dir (hereafter `file_dir`)
 /// 
 /// `file_dir`:
+///     `storage`, file containing some persistent information for the server:
+///         kem_ek: EncapsulationKey,
+///         kem_dk: DecapsulationKey,
+/// 
 ///     `entries`, dir containing entry files:
 ///         each entry file has no extension and is named with its id in hex
 ///         see `lib.rs` for the entry file format
@@ -41,10 +76,6 @@ const SERVER_MAINLOOP_PERIOD: Duration = Duration::new(0, 1000000); // ie. 1 ms
 ///             0:  the root entry, this entry *MUST* exist,
 ///                                 access group which is its own parent but not its own child,
 ///           
-///     `user_list`, a file of all the user ids:
-///         user_id 1 (u64),
-///         ...
-///         user_id n (u64)
 /// 
 ///     `users`, dir containing a file for each user:
 ///         each file is named after a user_id in hex,
@@ -57,12 +88,11 @@ const SERVER_MAINLOOP_PERIOD: Duration = Duration::new(0, 1000000); // ie. 1 ms
 ///         
 ///         
 /// 
-
 struct MessageBoard {
     address: String,
     file_dir: Box<Path>,
-    entry_ids: Arc<RwLock<HashSet<u64>>>,
-    user_ids: Arc<RwLock<HashSet<u64>>>,
+    entry_ids: RwLock<HashSet<u64>>,
+    user_ids: RwLock<HashSet<u64>>,
 }
 
 #[allow(unused)]
@@ -116,8 +146,8 @@ impl MessageBoard {
         let board = MessageBoard { 
             address,
             file_dir,
-            entry_ids: Arc::new(RwLock::new(HashSet::new())),
-            user_ids: Arc::new(RwLock::new(HashSet::new())),
+            entry_ids: RwLock::new(HashSet::new()),
+            user_ids: RwLock::new(HashSet::new()),
         };
         
         println!("MessageBoard config successfully established");
@@ -235,6 +265,32 @@ impl MessageBoard {
         Self::overwrite_old(path, &new_data.into_data()?) //FIXME: completely overwrites, even for small edits
     }
 
+    fn read_storage_file(&self) -> StorageFile {
+        let mut path = PathBuf::from(self.file_dir.clone());
+        path.push("storage");
+        let mut data = std::fs::read(path).unwrap().into_iter();
+        let kem_ek = EncapsulationKey::from_data_iter(&mut data).unwrap();
+        let kem_dk = DecapsulationKey::from_data_iter(&mut data).unwrap();
+        StorageFile { kem_ek, kem_dk }
+    }
+
+    fn write_storage_file(&self, storage_file: StorageFile) {
+        let mut path = PathBuf::from(self.file_dir.clone());
+        path.push("storage");
+        let mut data = Vec::new();
+        storage_file.kem_ek.extend_data(&mut data).unwrap();
+        storage_file.kem_dk.extend_data(&mut data).unwrap();
+        Self::overwrite_old(path, &data);
+    }
+
+    fn get_user_aead(&self, user_id: u64) -> Result<GuardedUserAeadKey<'_>, DataError> {
+        let user = self.get_user(user_id)?;
+        Ok(GuardedUserAeadKey {
+            board: self,
+            user_id,
+            key: user.aead,
+        })
+    }
 
     fn update_user_ids(&self) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
@@ -334,10 +390,11 @@ impl MessageBoard {
         Ok(false)
     }
 
-    fn add_user(&self, new_user_id: u64) -> Result<(), DataError> {
+    fn add_user(&self, crypto_rng: impl OldCryptoRng + OldRngCore, new_user_id: u64) -> Result<(), DataError> {
+        let key = UserAeadKey::new_random(crypto_rng);
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push(format!("users/{:016X}", new_user_id));
-        Self::write_new(&path, &UserData::new_empty().into_data()?);
+        Self::write_new(&path, &UserData::new_empty(key).into_data()?);
         Ok(())
     }
 
@@ -345,7 +402,7 @@ impl MessageBoard {
     fn command_handler(&'static self, response_tx: mpsc::Sender<(u64, BoardResponse)>, handler_id: u64) -> mpsc::Sender<BoardRequest> {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            fn handle_request(board: &MessageBoard, rng: impl Rng, request: BoardRequest) -> MaybeBoardResponse {
+            fn handle_request(board: &MessageBoard, rng: impl Rng, crypto_rng: impl OldCryptoRng + OldRngCore, request: BoardRequest) -> MaybeBoardResponse {
                 match request {
                     BoardRequest::GetEntry { user_id, entry_id} => {
                         let entry = board.get_entry(entry_id)?;
@@ -379,17 +436,18 @@ impl MessageBoard {
                     }
                     BoardRequest::AddUser => {
                         let user_id = MessageBoard::generate_unique_id(rng, &board.user_ids.read().unwrap());
-                        board.add_user(user_id)?;
+                        board.add_user(crypto_rng, user_id)?;
                         Ok(BoardResponse::AddUser(user_id))
                     }
                 }
             }
 
             let mut rng = rand::rng();
+            let mut crypto_rng = get_crypto_rng();
             for request in rx {
                 let response = (
                     handler_id,
-                    BoardResponse::encapsulate_error(handle_request(&self, &mut rng, request)),
+                    BoardResponse::encapsulate_error(handle_request(&self, &mut rng, &mut crypto_rng, request)),
                 );
                 let _ = response_tx.send(response);
             }
@@ -402,14 +460,19 @@ struct Server {
     board: MessageBoard,
     client_id_map: RwLock<HashMap<u64, TcpStream>>,
     next_client_id: std::cell::Cell<u64>,
+    kem_ek: EncapsulationKey,
+    kem_dk: DecapsulationKey,
 }
 
 impl Server {
     fn new(board: MessageBoard) -> Self {
+        let storage = board.read_storage_file();
         Server { 
             board, 
             client_id_map: RwLock::new(HashMap::new()),
             next_client_id: std::cell::Cell::new(0),
+            kem_ek: storage.kem_ek,
+            kem_dk: storage.kem_dk,
         }
     }
 
@@ -417,7 +480,7 @@ impl Server {
         let (incomind_queue_tx, incoming_queue_rx) = mpsc::channel();
         let (outgoing_queue_tx, outgoing_queue_rx) = mpsc::channel();
 
-        let Server { board, client_id_map, next_client_id: _} = self;
+        let Server { board, client_id_map, kem_dk, ..} = self;
         //let client_id_map: &_ = client_id_map;
 
         // incoming
@@ -443,8 +506,10 @@ impl Server {
                     let mut request = vec![0u8; request_size + 8];
                     if client.read_exact(&mut request).is_err() {continue}; // should send some error
                     println!("Received {} byte message", request_size);
-                    let Ok(request) = BoardRequest::from_data(&request[8..]) else {continue}; // should send some error
-                    incomind_queue_tx.send((*id, request)).expect("Queue Rx should be alive");
+                    let Ok((re_encyption_data, request)) = BoardRequest::secure_from_data(kem_dk, |user_id| {
+                        board.get_user_aead(user_id).ok()
+                    },&request[8..]) else {continue}; // should send some error
+                    incomind_queue_tx.send((*id, re_encyption_data, request)).expect("Queue Rx should be alive");
                 }
 
                 if let Ok(mut global_id_map) = client_id_map.try_write() {
@@ -491,8 +556,8 @@ impl Server {
                 if num_active == num_threads {
                     // note: blocking
                     let (handler_id, data) = response_rx.recv().expect("command_handler threads should keep response_tx alive");
-                    let client_id = handler_clients[handler_id as usize].take().expect("Handlers should only respond for a registered client");
-                    outgoing_queue_tx.send((client_id, data)).expect("The Outgoing Receiver should never drop");
+                    let (client_id, re_encryption_data) = handler_clients[handler_id as usize].take().expect("Handlers should only respond for a registered client");
+                    outgoing_queue_tx.send((client_id, re_encryption_data, data)).expect("The Outgoing Receiver should never drop");
                     num_active -= 1;
                 } else if num_active < num_threads {
                     let ideal_iter_start_time = iter_start_time + SERVER_MAINLOOP_PERIOD;
@@ -500,12 +565,12 @@ impl Server {
                     if ideal_iter_start_time > elapsed {std::thread::sleep(ideal_iter_start_time - elapsed)}
                     iter_start_time = timer.elapsed();
 
-                    if let Ok((client_id, request)) = incoming_queue_rx.try_recv() {
+                    if let Ok((client_id, re_encryption_data, request)) = incoming_queue_rx.try_recv() {
                         let mut sent_to_handler = false;
                         for (client, handler) in handler_clients.iter_mut().zip(&mut handler_threads) {
                             if client.is_some() {continue;}
                             
-                            *client = Some(client_id);
+                            *client = Some((client_id, re_encryption_data));
                             handler.send(request).expect("The Command Handler should never drop");
                             sent_to_handler = true;
                             num_active += 1;
@@ -517,8 +582,8 @@ impl Server {
                         }
                     }
                     if let Ok((handler_id, data)) = response_rx.try_recv() {
-                        let client_id = handler_clients[handler_id as usize].take().expect("Handlers should only respond for a registered client");
-                        outgoing_queue_tx.send((client_id, data)).expect("The Outgoing Receiver should never drop");
+                        let (client_id, re_encryption_data) = handler_clients[handler_id as usize].take().expect("Handlers should only respond for a registered client");
+                        outgoing_queue_tx.send((client_id, re_encryption_data, data)).expect("The Outgoing Receiver should never drop");
                         num_active -= 1;
                     }
                 } else if num_active > num_threads {
@@ -532,8 +597,10 @@ impl Server {
         });
         //outgoing
         std::thread::spawn(move || {
-            fn send_reponse(message: BoardResponse, client: &mut TcpStream) {
-                let message = message.into_data().unwrap_or_else(|_| {
+            fn send_reponse(board: &MessageBoard, crypto_rng: impl OldCryptoRng + OldRngCore, re_encryption_data: ReEncryptionData, message: BoardResponse, client: &mut TcpStream) {
+                let message = message.secure_into_data(crypto_rng, re_encryption_data, |user_id| {
+                    board.get_user_aead(user_id).ok()
+                }).unwrap_or_else(|_| {
                     println!("Failed to encode server response"); BoardResponse::Error(internal_error!()).into_data().unwrap()
                 });
                 println!("Sending {} byte message", message.len());
@@ -546,15 +613,17 @@ impl Server {
             let timer = Instant::now();
             let mut iter_start_time = Duration::new(0, 0);
 
+            let mut crypto_rng = get_crypto_rng();
+
             loop {
                 let ideal_iter_start_time = iter_start_time + SERVER_MAINLOOP_PERIOD;
                 let elapsed = timer.elapsed();
                 if ideal_iter_start_time > elapsed {std::thread::sleep(ideal_iter_start_time - elapsed)}
                 iter_start_time = timer.elapsed();
 
-                for (id, message) in outgoing_queue_rx.try_iter() {
-                    let Some(client) = clients_write.get_mut(&id) else {unresolved_messages.push((id, message)); continue;};
-                    send_reponse(message, client);
+                for (id, re_encryption_data, message) in outgoing_queue_rx.try_iter() {
+                    let Some(client) = clients_write.get_mut(&id) else {unresolved_messages.push((id, re_encryption_data, message)); continue;};
+                    send_reponse(board, &mut crypto_rng, re_encryption_data, message, client);
                 }
 
                 if let Ok(global_id_map) = client_id_map.try_read() {               
@@ -570,9 +639,9 @@ impl Server {
                         }
                     }
                     drop(global_id_map); // getting rid of the guard
-                    for (id, message) in unresolved_messages.drain(..) {
+                    for (id, re_encryption_data, message) in unresolved_messages.drain(..) {
                         let Some(client) = clients_write.get_mut(&id) else {eprintln!("client for id not found, dropping unresolved message"); continue;};
-                        send_reponse(message, client);
+                        send_reponse(board, &mut crypto_rng, re_encryption_data, message, client);
                     }
                 }
             }
