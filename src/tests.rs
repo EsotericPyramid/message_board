@@ -420,10 +420,10 @@ fn secure_board_request_data_conversion() {
     let mut server_aead_key = UserAeadKey::new_random(&mut crypto_rng);
     let user_aead_key = server_aead_key.clone();
     let (kem_dk, kem_ek) = get_kem_set(&mut crypto_rng);
-    let mut user_key = PublicKeySet::new(kem_ek, Some(user_aead_key));
+    let mut user_key = PublicKeySet::new(Some(kem_ek), Some(user_aead_key));
     for _ in 0..RANDOM_TEST_RETRIES {
         let request = new_rand_request(&mut rng, &mut char_rng, user_id);
-        let encoded = request.secure_into_data(&mut crypto_rng, Some(&mut user_key)).unwrap();
+        let encoded = request.secure_into_data(&mut crypto_rng, &mut user_key).unwrap();
         let (_, decoded) = BoardRequest::secure_from_data(&kem_dk, |x| if x == user_id {Some(&mut server_aead_key)} else {None}, &encoded).unwrap();
         assert_eq!(request, decoded);
     }
@@ -439,14 +439,14 @@ fn secure_board_batched_request_data_conversion() {
     let mut server_aead_key = UserAeadKey::new_random(&mut crypto_rng);
     let user_aead_key = server_aead_key.clone();
     let (kem_dk, kem_ek) = get_kem_set(&mut crypto_rng);
-    let mut user_key = PublicKeySet::new(kem_ek, Some(user_aead_key));
+    let mut user_key = PublicKeySet::new(Some(kem_ek), Some(user_aead_key));
     for _ in 0..RANDOM_TEST_RETRIES {
         let mut request_batch = Vec::new();
         for _ in 0..AEAD_NONCE_MEMORY + 1 {
             request_batch.push(new_rand_request(&mut rng, &mut char_rng, user_id))
         }
 
-        let mut encoded_batch = request_batch.iter().map(|x| x.secure_into_data(&mut crypto_rng, Some(&mut user_key)).unwrap()).enumerate().collect::<Vec<_>>();
+        let mut encoded_batch = request_batch.iter().map(|x| x.secure_into_data(&mut crypto_rng, &mut user_key).unwrap()).enumerate().collect::<Vec<_>>();
         encoded_batch.shuffle(&mut rng);
         for (idx, encoded) in encoded_batch {
             let (_, decoded) = BoardRequest::secure_from_data(&kem_dk, |x| if x == user_id {Some(&mut server_aead_key)} else {None}, &encoded).unwrap();
@@ -466,7 +466,7 @@ fn secure_board_response_data_conversion() {
     let users_user_aead_key = servers_user_aead_key.clone();
 
     let (_kem_dk, kem_ek) = get_kem_set(&mut crypto_rng);
-    let mut user_key = PublicKeySet::new(kem_ek, Some(users_user_aead_key));
+    let mut user_key = PublicKeySet::new(Some(kem_ek), Some(users_user_aead_key));
 
     for _ in 0..RANDOM_TEST_RETRIES {
         let response = rand_response(&mut rng, &mut char_rng, &mut crypto_rng);
@@ -477,7 +477,7 @@ fn secure_board_response_data_conversion() {
         let encoded = response.secure_into_data(&mut crypto_rng, re_encryptor,  |key_user_id| 
             if key_user_id == user_id {Some(&mut servers_user_aead_key)} else {None}
         ).unwrap();
-        let decoded = BoardResponse::secure_from_data(&encoded, Some(&mut user_key)).unwrap();
+        let decoded = BoardResponse::secure_from_data(&encoded, &mut user_key).unwrap();
         if let BoardResponse::Error(_) = response {
             let BoardResponse::Error(_) = decoded else {panic!("Invalid Request Conversion (Err)")};
         } else {

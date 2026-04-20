@@ -1,6 +1,7 @@
 #![allow(unused_results)]
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use message_board::cryptography::UserAeadKey;
 use message_board::*;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Stylize;
@@ -32,6 +33,7 @@ use client_libs::base_widgets::*;
 
 struct Config {
     user_id: Option<u64>,
+    user_aead: Option<UserAeadKey>,
     server_address: String,
 }
 
@@ -43,8 +45,22 @@ impl Config {
             toml::Value::String(str) if str == "None" => None,
             _ => {panic!("The client RC file was misformatted")}
         };
+        let toml::Value::String(user_aead_hex) = &config_toml["user_aead"] else {panic!("The client RC file was misformatted")};
+        let user_aead;
+        if user_aead_hex == "None" {
+            user_aead = None;
+        } else {
+            user_aead = Some(read_long_hex_string(&user_aead_hex)
+                .map(|x| UserAeadKey::from_data(&x))
+                .flatten()
+                .expect("The client RC file was misformatted"));
+        }
         let toml::Value::String(server_address) = &config_toml["address"] else {panic!("The client RC file was misformatted")};
-        Config { user_id, server_address: server_address.clone() }
+        Config { 
+            user_id, 
+            user_aead: user_aead,
+            server_address: server_address.clone(),
+        }
     }
 
     fn into_toml(self) -> toml::Table {
@@ -54,6 +70,11 @@ impl Config {
             None => toml::Value::String(String::from("None")),
         };
         config_toml.insert(String::from("user_id"), user_id);
+        let user_aead = match self.user_aead {
+            Some(aead) => toml::Value::String(write_long_hex_string(&aead.into_data().unwrap())),
+            None => toml::Value::String(String::from("None")),
+        };
+        config_toml.insert(String::from("user_aead"), user_aead);
         config_toml.insert(String::from("address"), toml::Value::String(self.server_address));
         config_toml
     }
@@ -100,6 +121,7 @@ fn validate_config() {
                     let _ = stdin.read_line(&mut server_address);
                     config.insert("address".to_string(), toml::Value::String(server_address.trim().to_string()));
                     config.insert("user_id".to_string(), toml::Value::String("None".to_string()));
+                    config.insert("user_aead".to_string(), toml::Value::String("None".to_string()));
 
                     let mut parent = real_rc_config.clone();
                     parent.pop();

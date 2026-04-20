@@ -397,7 +397,8 @@ pub fn read_from_exposed_block(input_stream: &mut impl Iterator<Item = u8>) -> R
 }
 
 pub fn extend_with_full_anonymous_block(rng: impl OldCryptoRng + OldRngCore, keys: &mut PublicKeySet, output_stream: &mut Vec<u8>, to_encrypt: &[u8]) -> Result<SimpleAeadKey, DataError> {
-    let (kem_ct, kem_sk) = keys.kem.raw_encapsulate(rng)?;
+    let Some(kem) = &keys.kem else {return Err(DataError::MissingKey)};
+    let (kem_ct, kem_sk) = kem.raw_encapsulate(rng)?;
     let mut aead_key: [u8; _] = [0; _];
     for i in 0..aead_key.len() {
         aead_key[i] = kem_sk[i % kem_sk.len()];
@@ -428,14 +429,15 @@ pub fn read_from_full_anonymous_block(kem_dk: &DecapsulationKey, input_stream: &
 }
 
 pub fn extend_with_user_block(mut rng: impl OldCryptoRng + OldRngCore, keys: &mut PublicKeySet, user_id: u64, output_stream: &mut Vec<u8>, to_encrypt: &[u8]) -> Result<(), DataError> {
-    let Some(aead) = keys.user_aead.as_mut() else {return Err(DataError::MissingKey);};
+    let Some(aead) = &mut keys.user_aead else {return Err(DataError::MissingKey);};
+    let Some(kem) = &keys.kem else {return Err(DataError::MissingKey);};
     // todo: see if I want to use any associated data
     let (nonce, aead_ct) = aead.encrypt(to_encrypt, &[])?;
     let mut kem_sk: Vec<u8> = Vec::new();
     kem_sk.extend_from_slice(&user_id.to_le_bytes());
     let nonce_mask: u128 = (rng.next_u64() as u128) << AEAD_NONCE_BIT_LENGTH;
     kem_sk.extend_from_slice(&(nonce ^ nonce_mask).to_le_bytes());
-    let kem_ct = keys.kem.encapsulate(rng, &kem_sk)?;
+    let kem_ct = kem.encapsulate(rng, &kem_sk)?;
     kem_ct.extend_data(output_stream)?;
     bounded_usize!(aead_ct.len(), u64)?;
     output_stream.extend_from_slice(&(aead_ct.len() as u64).to_le_bytes());

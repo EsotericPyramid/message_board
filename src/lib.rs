@@ -588,37 +588,44 @@ impl AsData for UserData {
     }
 }
 
+#[derive(Debug)]
 pub struct PublicKeySet {
-    pub kem: EncapsulationKey,
+    pub kem: Option<EncapsulationKey>,
     pub simple_aead: VecDeque<SimpleAeadKey>, // not stored in data
     pub user_aead: Option<UserAeadKey>,
 }
 
 impl PublicKeySet {
-    pub fn new(kem: EncapsulationKey, user_aead: Option<UserAeadKey>) -> Self {
+    pub fn new(kem: Option<EncapsulationKey>, user_aead: Option<UserAeadKey>) -> Self {
         Self { kem, simple_aead: VecDeque::new(), user_aead }
     } 
 }
 
 impl AsData for PublicKeySet {
     fn size_hint(&self) -> usize {
-        self.kem.size_hint() + 1 + if let Some(aead) = self.user_aead.as_ref() {aead.size_hint()} else {0}
+        1 + self.kem.as_ref().map_or(0, |x| x.size_hint())+ self.user_aead.as_ref().map_or(0, |x| x.size_hint())
     }
 
     fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> where Self: Sized {
-        let kem = EncapsulationKey::from_data_iter(data_iter)?;
-        let has_user_aead = read_u8(data_iter)? != 0;
+        let option_bools = read_u8(data_iter)?;
+        let has_kem = (option_bools & 0b01) != 0;
+        let has_user_aead = (option_bools & 0b10) != 0;
+        let mut kem = None;
+        if has_kem {
+            kem = Some(EncapsulationKey::from_data_iter(data_iter)?);
+        }
         let mut user_aead = None;
         if has_user_aead {
-            let aead = UserAeadKey::from_data_iter(data_iter)?;
-            user_aead = Some(aead);
+            user_aead = Some(UserAeadKey::from_data_iter(data_iter)?);
         }
         Ok(Self::new(kem, user_aead))
     }
 
     fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
-        self.kem.extend_data(data)?;
-        data.push(self.user_aead.is_some() as u8);
+        data.push((self.kem.is_some() as u8) | ((self.user_aead.is_some() as u8) << 1));
+        if let Some(kem) = self.kem.as_ref() {
+            kem.extend_data(data)?;
+        }
         if let Some(aead) = self.user_aead.as_ref() {
             aead.extend_data(data)?;
         }
@@ -784,7 +791,7 @@ impl AsData for BoardRequest {
 /// AddUser, 0x21 (any):
 ///     - no data -
 impl BoardRequest {
-    pub fn secure_extend_data(&self, rng: impl OldCryptoRng + OldRngCore, keys: Option<&mut PublicKeySet>, data: &mut Vec<u8>) -> Result<(), DataError> {
+    pub fn secure_extend_data(&self, rng: impl OldCryptoRng + OldRngCore, keys: &mut PublicKeySet, data: &mut Vec<u8>) -> Result<(), DataError> {
         data.push(REQUEST_FORMAT_VERSION); //version
         let mut body = Vec::new();
         match self {
@@ -812,12 +819,11 @@ impl BoardRequest {
         };
         match self {
             BoardRequest::GetEntry { user_id, .. } | BoardRequest::AddEntry { user_id, ..} | BoardRequest::EditEntry { user_id, .. } => {
-                let Some(keys) = keys else {return Err(DataError::MissingKey)};
                 data.push(USER);
                 extend_with_user_block(rng, keys, *user_id, data, &mut body)?;
             }
             BoardRequest::GetUser { .. } | BoardRequest::AddUser { .. } => {
-                if let Some(keys) = keys {
+                if keys.kem.is_some() {
                     data.push(FULL_ANON);
                     let simple_aead = extend_with_full_anonymous_block(rng, keys, data, &mut body)?;
                     keys.simple_aead.push_back(simple_aead);
@@ -830,7 +836,7 @@ impl BoardRequest {
         Ok(())
     }
 
-    pub fn secure_into_data(&self, rng: impl OldCryptoRng + OldRngCore, keys: Option<&mut PublicKeySet>) -> Result<Vec<u8>, DataError> {
+    pub fn secure_into_data(&self, rng: impl OldCryptoRng + OldRngCore, keys: &mut PublicKeySet) -> Result<Vec<u8>, DataError> {
         let mut out = Vec::new();
         self.secure_extend_data(rng, keys, &mut out)?;
         Ok(out)
@@ -1099,7 +1105,7 @@ impl BoardResponse {
         Ok(out)
     }
 
-    pub fn secure_from_data_iter(data_iter: &mut impl Iterator<Item = u8>, keys: Option<&mut PublicKeySet>) -> Result<Self, DataError> {
+    pub fn secure_from_data_iter(data_iter: &mut impl Iterator<Item = u8>, keys: &mut PublicKeySet) -> Result<Self, DataError> {
         let version = read_u8(data_iter)?;
         if version != 0 {return Err(DataError::UnsupportedVersion)}
         let mut body = match read_u8(data_iter)? {
@@ -1107,7 +1113,6 @@ impl BoardResponse {
                 read_from_exposed_block(data_iter)?.collect::<Vec<_>>()
             }
             FULL_ANON => {
-                let Some(keys) = keys else {return Err(DataError::MissingKey)};
                 let (true_key, body) = read_from_full_anonymous_response_block(keys.simple_aead.iter(), data_iter)?;
                 let mut true_key_idx = 0;
                 for (key_idx, key) in keys.simple_aead.iter().enumerate() {
@@ -1117,7 +1122,6 @@ impl BoardResponse {
                 body
             }
             USER => {
-                let Some(keys) = keys else {return Err(DataError::MissingKey)};
                 let Some(user_aead) = &mut keys.user_aead else {return Err(DataError::MissingKey)};
                 read_from_user_response_block(user_aead, data_iter)?
             }
@@ -1150,7 +1154,7 @@ impl BoardResponse {
         })
     }
 
-    pub fn secure_from_data(data: &[u8], keys: Option<&mut PublicKeySet>) -> Result<Self, DataError> {
+    pub fn secure_from_data(data: &[u8], keys: &mut PublicKeySet) -> Result<Self, DataError> {
         Self::secure_from_data_iter(&mut data.iter().copied(), keys)
     }
 }

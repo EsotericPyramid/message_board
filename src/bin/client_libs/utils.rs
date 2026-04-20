@@ -1,4 +1,5 @@
 use crossterm::event::Event;
+use message_board::cryptography::{get_crypto_rng, CryptoRng};
 use message_board::*;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::widgets::{Clear};
@@ -13,6 +14,28 @@ use ratatui::{
 use message_board::internal_error;
 use super::super::*;
 
+
+pub fn read_long_hex_string(string: &str) -> Result<Vec<u8>, DataError> {
+    let mut iter = string.chars();
+    let mut data = Vec::with_capacity(iter.size_hint().0 / 2);
+    loop {
+        let Some(char1) = iter.next() else {break;};
+        let Some(char2) = iter.next() else {return Err(DataError::InsufficientBytes)};
+        let mut byte_string = String::with_capacity(2);
+        byte_string.push(char1);
+        byte_string.push(char2);
+        data.push(u8::from_str_radix(&byte_string, 16).map_err(|_| DataError::NonChild)?);
+    }
+    Ok(data)
+}
+
+pub fn write_long_hex_string(hex: &[u8]) -> String {
+    let mut out = String::with_capacity(hex.len() * 2);
+    for byte in hex {
+        out.push_str(&format!("{:02X}", byte));
+    }
+    out
+}
 
 #[macro_export]
 macro_rules! left {
@@ -76,6 +99,8 @@ pub trait InputWidget {
 pub struct MessageBoardConnection {
     stream: TcpStream,
     user_id: Option<u64>,
+    keys: PublicKeySet,
+    crypto_rng: CryptoRng,
 }
 
 impl MessageBoardConnection {
@@ -90,7 +115,12 @@ impl MessageBoardConnection {
             }
         }
         
-        let mut board = Self { stream: connected_stream.unwrap(), user_id: config.user_id };
+        let mut board = Self { 
+            stream: connected_stream.unwrap(), 
+            user_id: config.user_id, 
+            keys: PublicKeySet::new(None, config.user_aead.as_ref().map(|x| x.clone())),
+            crypto_rng: get_crypto_rng(),
+        };
         if let Some(user_id) = board.user_id {
             if let Err(e) = board.get_user(user_id) {
                 eprintln!("User Id not found on server ({:?})", e);
@@ -99,11 +129,12 @@ impl MessageBoardConnection {
         } else {
             let _ = board.create_user(); // FIXME: should notify in some way if a new one was minted
         }
+        //TODO: initialize kem_ek
         board
     }
 
     fn send_request(&mut self, request: BoardRequest) -> Result<BoardResponse, DataError> {
-        let request = request.into_data()?;
+        let request = request.secure_into_data(&mut self.crypto_rng, &mut self.keys)?;
         let _ = self.stream.write_all(&(request.len() as u64).to_le_bytes());
         let _ = self.stream.write_all(&request);
         let mut num_bytes = [0; 8];
