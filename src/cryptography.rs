@@ -209,8 +209,9 @@ impl UserAeadKey {
     pub fn decrypt(&mut self, nonce: u128, to_decrypt: &[u8], associated: &[u8]) -> Result<Vec<u8>, DataError> {
         fn inner(key: &UserAeadKey, raw_nonce: RawAeadNonce, payload: aead::Payload<'_, '_>) -> Result<Vec<u8>, DataError> {
             let aead = RawAead::new(&key.key);
-            let result = aead.decrypt(&raw_nonce.into(), payload);
-            Ok(result?)
+
+            let result = aead.decrypt(&raw_nonce.into(), payload)?;
+            Ok(result)
         }
 
         if nonce > AEAD_NONCE_MAX {return Err(DataError::EncryptionError)}
@@ -219,6 +220,7 @@ impl UserAeadKey {
             aad: associated
         };
         
+
         if nonce < self.nonce_rng.get_word_pos() {
             if let Ok(idx) = self.old_nonces.binary_search(&nonce) {
                 let old_count = self.nonce_rng.get_word_pos();
@@ -307,7 +309,7 @@ impl AsData for KemCipherText {
 }
 
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub struct EncapsulationKey{key: RawEncapsulationKey}
 
 impl EncapsulationKey {
@@ -345,7 +347,7 @@ impl AsData for EncapsulationKey {
 }
 
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub struct DecapsulationKey{key: RawDecapsulationKey}
 
 impl DecapsulationKey {
@@ -446,13 +448,14 @@ pub fn extend_with_user_block(mut rng: impl OldCryptoRng + OldRngCore, keys: &mu
 }
 
 pub fn read_from_user_block<'a, F: FnOnce(u64) -> Option<T>, T: Deref<Target = UserAeadKey> + DerefMut>(kem_dk: &DecapsulationKey, input_stream: &mut impl Iterator<Item = u8>, get_user_aead: F) -> Result<(u64, Vec<u8>), DataError> {
+
     let kem_ct = KemCipherText::from_data_iter(input_stream)?;
     let mut packed_kem_sk = kem_dk.decapsulate(kem_ct, 8 + 16)?;
     let user_id = read_u64(&mut packed_kem_sk)?;
     let nonce = read_u128(&mut packed_kem_sk)? & AEAD_NONCE_MAX;
-    let mut aead = get_user_aead(user_id).map_or(Err(DataError::MissingKey), |x| Ok(x))?;
+    let aead = &mut *get_user_aead(user_id).map_or(Err(DataError::MissingKey), |x| Ok(x))?;
     let aead_len = read_u64(input_stream)? as usize;
-    let aead_pt = (*aead).decrypt(nonce, &input_stream.take(aead_len).collect::<Vec<_>>(), &[])?;
+    let aead_pt = aead.decrypt(nonce, &input_stream.take(aead_len).collect::<Vec<_>>(), &[])?;
     Ok((user_id, aead_pt))
 }
 

@@ -136,6 +136,7 @@ fn validate_config() {
         }
     }
     let rc_config = rc_config_result.unwrap();
+    // FIXME: doesn't make sure the config contains all the keys
     let _ = Config::from_toml(&rc_config);
 }
 
@@ -771,7 +772,7 @@ impl InputWidget for EntryTreeViewer {
         self.path.render(path_area, buf);
         let navigator_sub_area = self.navigator.render(navigator_area, buf);
         let content_sub_area = self.viewer.render(content_area, buf);
-        eprintln!("EntryTreeViewer: {:?}", content_sub_area);
+        //eprintln!("EntryTreeViewer: {:?}", content_sub_area);
         let mut matched_state = self.state;
         if let TreeViewerState::Unfocused = matched_state {matched_state = self.awaited_child_parent.unwrap_or(TreeViewerState::Unfocused)}
         match matched_state {
@@ -953,7 +954,7 @@ impl Client {
     }
 
     fn handle_state_change(&mut self, change: Option<StateChange>) {
-        eprintln!("{:?}", change);
+        //eprintln!("{:?}", change);
         if let Some(change) = change {
             match change {
                 StateChange::Push(mut new_state) => {
@@ -1039,7 +1040,7 @@ impl Widget for &Client {
         }
         let mut area = layout[1];
         for sub_state in &self.state {
-            eprintln!("{:?}", sub_state);
+            //eprintln!("{:?}", sub_state);
             area = sub_state.render(area, buf);
         } 
     }

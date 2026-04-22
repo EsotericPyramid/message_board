@@ -183,7 +183,10 @@ fn rand_response(mut rng: impl Rng, char_rng: impl Iterator<Item = char>, crypto
             BoardResponse::GetUser(rand_user(rng, crypto_rng))
         }
         4 => {
-            BoardResponse::AddUser(rng.next_u64())
+            BoardResponse::AddUser{
+                user_id: rng.next_u64(), 
+                user_aead: UserAeadKey::new_random(crypto_rng)
+            }
         }
         5 => {
             BoardResponse::Error(internal_error!())

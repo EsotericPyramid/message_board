@@ -915,7 +915,7 @@ pub enum BoardResponse {
     EditEntry,
 
     GetUser(UserData),
-    AddUser(u64),
+    AddUser{user_id: u64, user_aead: UserAeadKey},
 
     GetKemEk(EncapsulationKey),
     
@@ -973,9 +973,10 @@ impl AsData for BoardResponse {
                 data.push(GET_USER);
                 user.extend_data(data)?;
             }
-            BoardResponse::AddUser(user_id) => {
+            BoardResponse::AddUser{user_id, user_aead} => {
                 data.push(ADD_USER);
                 data.extend_from_slice(&user_id.to_le_bytes());
+                user_aead.extend_data(data)?;
             }
             BoardResponse::GetKemEk(kem_ek) => {
                 data.push(GET_KEM_EK);
@@ -1010,7 +1011,8 @@ impl AsData for BoardResponse {
             }
             ADD_USER => { // AddUser
                 let user_id = read_u64(data_iter)?;
-                BoardResponse::AddUser(user_id)
+                let user_aead = UserAeadKey::from_data_iter(data_iter)?;
+                BoardResponse::AddUser{user_id, user_aead}
             }
             // network responses
             GET_KEM_EK => {
@@ -1038,8 +1040,8 @@ impl AsData for BoardResponse {
             BoardResponse::GetUser(user) => {
                 1 + 1 + user.size_hint()
             }
-            BoardResponse::AddUser(_) => {
-                1 + 1 + 8
+            BoardResponse::AddUser{user_id: _, user_aead } => {
+                1 + 1 + 8 + user_aead.size_hint()
             }
             BoardResponse::GetKemEk(kem_ek) =>{
                 1 + 1 + kem_ek.size_hint()
@@ -1097,9 +1099,10 @@ impl BoardResponse {
                 body.push(GET_USER);
                 user.extend_data(&mut body)?;
             }
-            BoardResponse::AddUser(user_id) => {
+            BoardResponse::AddUser{user_id, user_aead} => {
                 body.push(ADD_USER);
                 body.extend_from_slice(&user_id.to_le_bytes());
+                user_aead.extend_data(&mut body)?;
             }
             BoardResponse::GetKemEk(kem_ek) => {
                 body.push(GET_KEM_EK);
@@ -1174,11 +1177,12 @@ impl BoardResponse {
             }
             ADD_USER => { // AddUser
                 let user_id = read_u64(&mut body)?;
-                BoardResponse::AddUser(user_id)
+                let user_aead = UserAeadKey::from_data_iter(&mut body)?;
+                BoardResponse::AddUser{user_id, user_aead}
             }
             // network responses
             GET_KEM_EK => {
-                let kem_ek = EncapsulationKey::from_data_iter(data_iter)?;
+                let kem_ek = EncapsulationKey::from_data_iter(&mut body)?;
                 BoardResponse::GetKemEk(kem_ek)
             }
             ERROR => {

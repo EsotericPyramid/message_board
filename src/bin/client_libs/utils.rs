@@ -142,7 +142,7 @@ impl MessageBoardConnection {
         let num_bytes = u64::from_le_bytes(num_bytes) as usize;
         let mut buffer = vec![0; num_bytes];
         let _ = self.stream.read_exact(&mut buffer);
-        BoardResponse::from_data(&buffer)
+        BoardResponse::secure_from_data(&buffer, &mut self.keys)
     }
 
     pub fn get_entry(&mut self, entry_id: u64) -> Result<Entry, DataError> {
@@ -177,9 +177,10 @@ impl MessageBoardConnection {
         //if let Some(_) = self.user_id {return Ok(false)}
         let request = BoardRequest::AddUser;
         let response = self.send_request(request)?;
-        let BoardResponse::AddUser(user_id) = response else {return Err(internal_error!())};
+        let BoardResponse::AddUser{user_id, user_aead} = response else {return Err(internal_error!())};
         self.user_id = Some(user_id);
-        edit_config(|config| config.user_id = Some(user_id));
+        self.keys.user_aead = Some(user_aead.clone());
+        edit_config(|config| {config.user_id = Some(user_id); config.user_aead = Some(user_aead)});
         Ok(true)
     }
 
@@ -192,6 +193,14 @@ impl MessageBoardConnection {
     }
 
     pub fn get_user_id(&self) -> &Option<u64> {&self.user_id}
+}
+
+impl Drop for MessageBoardConnection {
+    fn drop(&mut self) {
+        edit_config(|config| {
+            config.user_aead = self.keys.user_aead.clone();
+        });
+    }
 }
 
 #[derive(Debug)]
