@@ -129,7 +129,7 @@ impl MessageBoardConnection {
         } else {
             let _ = board.create_user(); // FIXME: should notify in some way if a new one was minted
         }
-        //TODO: initialize kem_ek
+        board.update_kem().unwrap();
         board
     }
 
@@ -166,7 +166,6 @@ impl MessageBoardConnection {
         Ok(())
     }
 
-
     pub fn get_user(&mut self, user_id: u64) -> Result<UserData, DataError> {
         let request = BoardRequest::GetUser { user_id };
         let response = self.send_request(request)?;
@@ -182,6 +181,14 @@ impl MessageBoardConnection {
         self.user_id = Some(user_id);
         edit_config(|config| config.user_id = Some(user_id));
         Ok(true)
+    }
+
+    pub fn update_kem(&mut self) -> Result<(), DataError> {
+        let request = BoardRequest::GetKemEk;
+        let response = self.send_request(request)?;
+        let BoardResponse::GetKemEk(kem_ek) = response else {return Err(internal_error!())};
+        self.keys.kem = Some(kem_ek);
+        Ok(())
     }
 
     pub fn get_user_id(&self) -> &Option<u64> {&self.user_id}

@@ -439,6 +439,9 @@ impl MessageBoard {
                         board.add_user(crypto_rng, user_id)?;
                         Ok(BoardResponse::AddUser(user_id))
                     }
+                    BoardRequest::GetKemEk => {//should be handled by server
+                        return Err(internal_error!()); 
+                    }
                 }
             }
 
@@ -566,19 +569,23 @@ impl Server {
                     iter_start_time = timer.elapsed();
 
                     if let Ok((client_id, re_encryption_data, request)) = incoming_queue_rx.try_recv() {
-                        let mut sent_to_handler = false;
-                        for (client, handler) in handler_clients.iter_mut().zip(&mut handler_threads) {
-                            if client.is_some() {continue;}
-                            
-                            *client = Some((client_id, re_encryption_data));
-                            handler.send(request).expect("The Command Handler should never drop");
-                            sent_to_handler = true;
-                            num_active += 1;
-                            break;
-                        }
-                        if !sent_to_handler {
-                            eprintln!("dropped a request (no available handler)");
-                            num_active = num_threads; //evidently, they are all active
+                        if let BoardRequest::GetKemEk = request {
+
+                        } else {
+                            let mut sent_to_handler = false;
+                            for (client, handler) in handler_clients.iter_mut().zip(&mut handler_threads) {
+                                if client.is_some() {continue;}
+                                
+                                *client = Some((client_id, re_encryption_data));
+                                handler.send(request).expect("The Command Handler should never drop");
+                                sent_to_handler = true;
+                                num_active += 1;
+                                break;
+                            }
+                            if !sent_to_handler {
+                                eprintln!("dropped a request (no available handler)");
+                                num_active = num_threads; //evidently, they are all active
+                            }
                         }
                     }
                     if let Ok((handler_id, data)) = response_rx.try_recv() {

@@ -26,11 +26,15 @@ pub const ERROR: u8 = 0xff;
 pub const MESSAGE: u8 = 0x00;
 pub const ACCESS_GROUP: u8 = 0x01;
 /// Request & Response
+/// 0x0_ & 0x1_: entry related requests
 pub const GET_ENTRY: u8 = 0x00;
 pub const ADD_ENTRY: u8 = 0x01;
 pub const EDIT_ENTRY: u8 = 0x02;
+/// 0x2_ & 0x3_ (?): user related requests
 pub const GET_USER: u8 = 0x20;
 pub const ADD_USER: u8 = 0x21;
+/// 0x8_: network / connection related requests
+pub const GET_KEM_EK: u8 = 0x80;
 /// encrypted variants
 pub const EXPOSED: u8 = 0x00;
 pub const FULL_ANON: u8 = 0x01;
@@ -669,6 +673,7 @@ pub enum BoardRequest {
     EditEntry { user_id: u64, entry_id: u64, entry: Entry },
     GetUser { user_id: u64 },
     AddUser,
+    GetKemEk,
 }
 
 impl AsData for BoardRequest {
@@ -695,9 +700,8 @@ impl AsData for BoardRequest {
                 data.push(GET_USER);
                 data.extend_from_slice(&user_id.to_le_bytes());
             },
-            BoardRequest::AddUser => {
-                data.push(ADD_USER);
-            },
+            BoardRequest::AddUser => data.push(ADD_USER),
+            BoardRequest::GetKemEk => data.push(GET_KEM_EK)
         };
         Ok(())
     }
@@ -732,7 +736,10 @@ impl AsData for BoardRequest {
             ADD_USER => { // AddUser
                 BoardRequest::AddUser
             }
-            
+            // network requests
+            GET_KEM_EK => {
+                BoardRequest::GetKemEk
+            }
             _ => {return Err(DataError::InvalidDiscriminant)}
         })
     }
@@ -752,6 +759,9 @@ impl AsData for BoardRequest {
                 1 + 1 + 8
             }
             BoardRequest::AddUser => {
+                1 + 1
+            }
+            BoardRequest::GetKemEk => {
                 1 + 1
             }
         }
@@ -813,24 +823,22 @@ impl BoardRequest {
                 body.push(GET_USER);
                 body.extend_from_slice(&user_id.to_le_bytes());
             },
-            BoardRequest::AddUser => {
-                body.push(ADD_USER);
-            },
+            BoardRequest::AddUser => body.push(ADD_USER),
+            BoardRequest::GetKemEk => body.push(GET_KEM_EK)
         };
         match self {
             BoardRequest::GetEntry { user_id, .. } | BoardRequest::AddEntry { user_id, ..} | BoardRequest::EditEntry { user_id, .. } => {
                 data.push(USER);
                 extend_with_user_block(rng, keys, *user_id, data, &mut body)?;
             }
-            BoardRequest::GetUser { .. } | BoardRequest::AddUser { .. } => {
-                if keys.kem.is_some() {
-                    data.push(FULL_ANON);
-                    let simple_aead = extend_with_full_anonymous_block(rng, keys, data, &mut body)?;
-                    keys.simple_aead.push_back(simple_aead);
-                } else {
-                    data.push(EXPOSED);
-                    extend_with_exposed_block(data, &mut body)?;
-                }
+            BoardRequest::GetUser { .. } | BoardRequest::AddUser { .. } if keys.kem.is_some() => {
+                data.push(FULL_ANON);
+                let simple_aead = extend_with_full_anonymous_block(rng, keys, data, &mut body)?;
+                keys.simple_aead.push_back(simple_aead);
+            }
+            _ => {
+                data.push(EXPOSED);
+                extend_with_exposed_block(data, &mut body)?;
             }
         }
         Ok(())
@@ -886,7 +894,10 @@ impl BoardRequest {
             ADD_USER => { // AddUser
                 BoardRequest::AddUser
             }
-            
+            // network requests
+            GET_KEM_EK => {
+                BoardRequest::GetKemEk
+            }
             _ => {return Err(DataError::InvalidDiscriminant)}
         }))
     }
@@ -897,7 +908,7 @@ impl BoardRequest {
 }
 
 /// the response 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Debug)]
 pub enum BoardResponse {
     GetEntry(Entry),
     AddEntry(u64),
@@ -905,6 +916,8 @@ pub enum BoardResponse {
 
     GetUser(UserData),
     AddUser(u64),
+
+    GetKemEk(EncapsulationKey),
     
     Error(DataError),
 }
@@ -964,6 +977,10 @@ impl AsData for BoardResponse {
                 data.push(ADD_USER);
                 data.extend_from_slice(&user_id.to_le_bytes());
             }
+            BoardResponse::GetKemEk(kem_ek) => {
+                data.push(GET_KEM_EK);
+                kem_ek.extend_data(data)?;
+            }
             BoardResponse::Error(e) => { // TODO: should consider the error
                 eprintln!("Sending Error: {:?}", e);
                 data.push(ERROR);
@@ -995,6 +1012,11 @@ impl AsData for BoardResponse {
                 let user_id = read_u64(data_iter)?;
                 BoardResponse::AddUser(user_id)
             }
+            // network responses
+            GET_KEM_EK => {
+                let kem_ek = EncapsulationKey::from_data_iter(data_iter)?;
+                BoardResponse::GetKemEk(kem_ek)
+            }
             ERROR => {
                 BoardResponse::Error(internal_error!()) //not really an internal error, it just isn't encoded atm
             }
@@ -1018,6 +1040,9 @@ impl AsData for BoardResponse {
             }
             BoardResponse::AddUser(_) => {
                 1 + 1 + 8
+            }
+            BoardResponse::GetKemEk(kem_ek) =>{
+                1 + 1 + kem_ek.size_hint()
             }
             BoardResponse::Error(_) => {
                 1 + 1
@@ -1076,6 +1101,10 @@ impl BoardResponse {
                 body.push(ADD_USER);
                 body.extend_from_slice(&user_id.to_le_bytes());
             }
+            BoardResponse::GetKemEk(kem_ek) => {
+                body.push(GET_KEM_EK);
+                kem_ek.extend_data(&mut body)?;
+            }
             BoardResponse::Error(e) => { // TODO: should consider the error
                 eprintln!("Sending Error: {:?}", e);
                 body.push(ERROR);
@@ -1128,7 +1157,7 @@ impl BoardResponse {
             _ => {return Err(DataError::InvalidDiscriminant)}
         }.into_iter();
         Ok(match read_u8(&mut body)? {
-            // entry requests
+            // entry responses
             GET_ENTRY => { // GetEntry
                 let entry = Entry::from_data_iter(&mut body)?;
                 BoardResponse::GetEntry(entry)
@@ -1138,7 +1167,7 @@ impl BoardResponse {
                 BoardResponse::AddEntry(entry_id)
             }
             EDIT_ENTRY => BoardResponse::EditEntry,
-            // user requests
+            // user responses
             GET_USER => { // GetUser
                 let user = UserData::from_data_iter(&mut body)?;
                 BoardResponse::GetUser(user)
@@ -1146,6 +1175,11 @@ impl BoardResponse {
             ADD_USER => { // AddUser
                 let user_id = read_u64(&mut body)?;
                 BoardResponse::AddUser(user_id)
+            }
+            // network responses
+            GET_KEM_EK => {
+                let kem_ek = EncapsulationKey::from_data_iter(data_iter)?;
+                BoardResponse::GetKemEk(kem_ek)
             }
             ERROR => {
                 BoardResponse::Error(internal_error!()) //not really an internal error, it just isn't encoded atm
