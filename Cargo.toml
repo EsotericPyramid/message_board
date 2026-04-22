@@ -9,6 +9,10 @@ crossterm = "0.29.0"
 chrono = "0.4.43"
 rand = "0.10.0"
 toml = "1.0.3"
+
+log = "0.4.29"
+env_logger = "0.11.10"
+
 aes-gcm = { version = "0.10.3", features = ["rand_core"] }
 ml-kem = "0.2.3"
 typenum = "1.19.0"

@@ -1,3 +1,4 @@
+use log::*;
 use message_board::cryptography::{get_crypto_rng, get_kem_set, DecapsulationKey, EncapsulationKey, UserAeadKey};
 use message_board::*;
 use std::collections::{HashMap, HashSet};
@@ -150,7 +151,7 @@ impl MessageBoard {
             user_ids: RwLock::new(HashSet::new()),
         };
         
-        println!("MessageBoard config successfully established");
+        debug!("MessageBoard config successfully established");
         // checking / setting up the board files
 
         let mut missing_files = false;
@@ -200,7 +201,7 @@ impl MessageBoard {
                     entry_data: EntryData::AccessGroup { name: String::from("Root"), write_perms: DefaultedIdSet::White { blacklist_ids: Vec::new() }, read_perms: DefaultedIdSet::White { blacklist_ids: Vec::new() }}
                 };
                 if board.write_entry(ROOT_ENTRY_ID, default_root).is_err_and(|e| if let DataError::AlreadyExists = e {false} else {true}) {
-                    println!("failed to create root entry");
+                    error!("failed to create root entry");
                 }
             } else {
                 panic!("Cannot continue without board files, terminating the server");
@@ -421,7 +422,7 @@ impl MessageBoard {
             fn handle_request(board: &MessageBoard, rng: impl Rng, mut crypto_rng: impl OldCryptoRng + OldRngCore, request: BoardRequest) -> MaybeBoardResponse {
                 match request {
                     BoardRequest::GetEntry { user_id, entry_id} => {
-                        eprintln!("Request Type: GetEntry");
+                        info!("Request Type: GetEntry");
                         let entry = board.get_entry(entry_id)?;
                         if entry.header_data.author_id != user_id && !board.has_read_perm(user_id, entry.header_data.parent_id)? {
                             return Err(DataError::InsufficientPerms.into())
@@ -429,7 +430,7 @@ impl MessageBoard {
                         Ok(BoardResponse::GetEntry(entry))
                     }
                     BoardRequest::AddEntry { user_id , entry} => {
-                        eprintln!("Request Type: AddEntry");
+                        info!("Request Type: AddEntry");
                         if !board.has_write_perm(user_id, entry.header_data.parent_id)? {
                             return Err(DataError::InsufficientPerms.into())
                         }
@@ -438,7 +439,7 @@ impl MessageBoard {
                         Ok(BoardResponse::AddEntry(entry_id))
                     }
                     BoardRequest::EditEntry { user_id, entry_id, entry } => {
-                        eprintln!("Request Type: EditEntry");
+                        info!("Request Type: EditEntry");
                         let old_entry = board.get_entry(entry_id)?;
                         if entry.header_data.author_id != user_id || old_entry.header_data.author_id != user_id {
                             return Err(DataError::InsufficientPerms)
@@ -450,12 +451,12 @@ impl MessageBoard {
                         Ok(BoardResponse::EditEntry)
                     }
                     BoardRequest::GetUser { user_id } => {
-                        eprintln!("Request Type: GetUser");
+                        info!("Request Type: GetUser");
                         let user = board.get_user(user_id)?;
                         Ok(BoardResponse::GetUser(user))
                     }
                     BoardRequest::AddUser => {
-                        eprintln!("Request Type: AddUser");
+                        info!("Request Type: AddUser");
                         let user_id = MessageBoard::generate_unique_id(rng, &board.user_ids.read().unwrap());
                         let user = board.add_user(&mut crypto_rng, user_id)?;
                         Ok(BoardResponse::AddUser{user_id, user_aead: user.aead})
@@ -530,15 +531,15 @@ impl Server {
                     let request_size = u64::from_le_bytes(request_size) as usize;
                     let mut request = vec![0u8; request_size + 8];
                     if client.read_exact(&mut request).is_err() {continue}; // should send some error
-                    println!("Received {} byte message", request_size);
+                    info!("Received {} byte message", request_size);
                     match BoardRequest::secure_from_data(kem_dk, |user_id| {
-                        board.get_user_aead(user_id).map_err(|e| {eprintln!("{:?}", e); e}).ok()
+                        board.get_user_aead(user_id).map_err(|e| {info!("Failed to retrieve User Aead for {:016X}: {:?}", user_id, e); e}).ok()
                     },&request[8..]) {
                         Ok((re_encyption_data, request)) => {
                             incomind_queue_tx.send((*id, re_encyption_data, request)).expect("Queue Rx should be alive");
                         }
                         Err(e) => {
-                            eprintln!("Failed to Parse Request: {:?}", e); 
+                            info!("Failed to Parse Request: {:?}", e); 
                             decode_error_queue_tx.send((*id, ReEncryptionData::Exposed, BoardResponse::Error(e))).expect("Queue Rx should be alive");
                         }
                     }
@@ -599,7 +600,7 @@ impl Server {
 
                     if let Ok((client_id, re_encryption_data, request)) = incoming_queue_rx.try_recv() {
                         if let BoardRequest::GetKemEk = request {
-                            eprintln!("Request Type: GetKemEk");
+                            info!("Request Type: GetKemEk");
                             outgoing_queue_tx.send((client_id, re_encryption_data, BoardResponse::GetKemEk(kem_ek.clone()))).expect("The Outgoing Receiver should never drop");
                         } else {
                             let mut sent_to_handler = false;
@@ -613,7 +614,7 @@ impl Server {
                                 break;
                             }
                             if !sent_to_handler {
-                                eprintln!("dropped a request (no available handler)");
+                                error!("dropped a request (no available handler)");
                                 num_active = num_threads; //evidently, they are all active
                             }
                         }
@@ -624,10 +625,10 @@ impl Server {
                         num_active -= 1;
                     }
                 } else if num_active > num_threads {
-                    eprintln!("More active handlers than threads for handlers, attempting recovery");
+                    warn!("More active handlers than threads for handlers, attempting recovery");
                     num_active = 4;
                 } else {
-                    eprintln!("Less than 0 active handlers, attempting recovery");
+                    warn!("Less than 0 active handlers, attempting recovery");
                     num_active = 0;
                 }
             }
@@ -638,9 +639,9 @@ impl Server {
                 let message = message.secure_into_data(crypto_rng, re_encryption_data, |user_id| {
                     board.get_user_aead(user_id).ok()
                 }).unwrap_or_else(|_| {
-                    println!("Failed to encode server response"); BoardResponse::Error(internal_error!()).into_data().unwrap()
+                    error!("Failed to encode server response"); BoardResponse::Error(internal_error!()).into_data().unwrap()
                 });
-                println!("Sending {} byte message", message.len());
+                info!("Sending {} byte message", message.len());
                 let _ = client.write_all(&(message.len() as u64).to_le_bytes());
                 let _ = client.write_all(&message); 
             }
@@ -677,7 +678,7 @@ impl Server {
                     }
                     drop(global_id_map); // getting rid of the guard
                     for (id, re_encryption_data, message) in unresolved_messages.drain(..) {
-                        let Some(client) = clients_write.get_mut(&id) else {eprintln!("client for id not found, dropping unresolved message"); continue;};
+                        let Some(client) = clients_write.get_mut(&id) else {info!("client for id not found, dropping unresolved message"); continue;};
                         send_reponse(board, &mut crypto_rng, re_encryption_data, message, client);
                     }
                 }
@@ -695,6 +696,8 @@ impl Server {
 }
 
 fn main() {
+    env_logger::init();
+
     let board = MessageBoard::new();
     let listener = TcpListener::bind((&board.address as &str, PORT)).unwrap();
 
@@ -703,10 +706,10 @@ fn main() {
 
     for stream in listener.incoming() {
         if let Ok(stream) = stream {
-            println!("Connection recieved");
+            info!("Connection recieved");
             server.add_client(stream);
         } else {
-            println!("Connection error");
+            warn!("Connection error");
         }
     }
 }
