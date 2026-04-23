@@ -302,13 +302,13 @@ impl InputWidget for EntryVariantSelector {
 
 #[derive(Debug)]
 struct IdList {
-    container: ScrollContainer<u64>,
+    container: ScrollContainer<Option<u64>>,
 }
 
 impl IdList {
     fn new(ids: Vec<u64>) -> Self {
         Self {
-            container: ScrollContainer::new(ids),
+            container: ScrollContainer::new(ids.into_iter().map(|x| Some(x)).collect()),
         }
     }
 }
@@ -316,7 +316,9 @@ impl IdList {
 
 impl InputWidget for IdList {
     fn render(&self, area: Rect, buf: &mut Buffer) -> Rect {
-        self.container.base_render(area, buf, " id list (temp name) ", |x| format!("{:016X}", x))
+        self.container.base_render(area, buf, " id list (temp name) ", |x| 
+            if let Some(x) = x {format!("{:016X}", x)} else {String::from("NONE")}
+        )
     }
     
     fn handle_event(&mut self, event: Event) -> Option<StateChange> {
@@ -327,6 +329,8 @@ impl InputWidget for IdList {
                 if !key_event.is_press() {return None}
                 match key_event.code {
                     KeyCode::Char('w') => {
+                        self.container.push(None);
+                        self.container.to_bottom();
                         return Some(StateChange::Push(ClientState::TextEntry(TextEntry::new(16))));
                     }
                     KeyCode::Char('d') | KeyCode::Backspace => {
@@ -352,9 +356,18 @@ impl InputWidget for IdList {
         match child {
             ClientState::TextEntry(text_entry) => {
                 let Ok(new_id) = u64::from_str_radix(&text_entry.text.iter().collect::<String>(), 16) else {
+                    if let Some((_, None)) = self.container.selection() {
+                        self.container.remove();
+                    }
                     return Some(StateChange::Push(ClientState::Error(vec![internal_error!()])));
                 };
-                if !self.container.items.contains(&new_id) {self.container.push(new_id)}
+                let new_id = Some(new_id);
+                if !self.container.items.contains(&new_id) {
+                    let Some((_, new_id_slot)) = self.container.selection_mut() else {
+                        return Some(StateChange::Push(ClientState::Error(vec![internal_error!()])));
+                    };
+                    *new_id_slot = new_id;
+                }
                 return Some(StateChange::Blank);
             }
             ClientState::Blank | ClientState::Error(_) => {}
@@ -637,9 +650,10 @@ impl InputWidget for EntryViewer {
                             }
                         }
                     }
-                    if id_lists[access_group_list.idx] != &access_group_list.id_list.container.items {
+                    let new_id_list = access_group_list.id_list.container.items.into_iter().map(|x| x.unwrap()).collect();
+                    if *id_lists[access_group_list.idx] != new_id_list {
                         self.has_mutated = true;
-                        let _ = std::mem::replace(id_lists[access_group_list.idx],access_group_list.id_list.container.items);
+                        let _ = std::mem::replace(id_lists[access_group_list.idx], new_id_list);
                     }
                 }
                 (_, ClientState::Blank | ClientState::Error(_)) => {}
@@ -770,13 +784,15 @@ impl InputWidget for EntryTreeViewer {
 
         Clear.render(area, buf);
         self.path.render(path_area, buf);
+        let mut popup_area = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(2), Constraint::Fill(1)]).split(area)[1];
+        popup_area = Layout::vertical([Constraint::Fill(1), Constraint::Fill(2), Constraint::Fill(1)]).split(popup_area)[1];
         let navigator_sub_area = self.navigator.render(navigator_area, buf);
         let content_sub_area = self.viewer.render(content_area, buf);
         //eprintln!("EntryTreeViewer: {:?}", content_sub_area);
         let mut matched_state = self.state;
         if let TreeViewerState::Unfocused = matched_state {matched_state = self.awaited_child_parent.unwrap_or(TreeViewerState::Unfocused)}
         match matched_state {
-            TreeViewerState::Unfocused => area,
+            TreeViewerState::Unfocused => popup_area,
             TreeViewerState::Content => content_sub_area,
             TreeViewerState::Navigate => navigator_sub_area,
         }

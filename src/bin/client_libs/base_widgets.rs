@@ -1,4 +1,5 @@
 use crossterm::event::Event;
+use ratatui::layout::Size;
 use ratatui::style::{Style, Stylize};
 use ratatui::{
     text::{Line, Text},
@@ -12,6 +13,7 @@ use crate::*;
 #[derive(Debug)]
 pub struct ScrollContainer<T> {
     pub cursor_pos: Option<usize>,
+    pub is_focused: bool,
     pub items: Vec<T>,
 }
 
@@ -19,8 +21,17 @@ impl<T> ScrollContainer<T> {
     pub fn new(items: Vec<T>) -> Self {
         Self {
             cursor_pos: None,
+            is_focused: false,
             items
         }
+    }
+
+    pub fn to_bottom(&mut self) {
+        self.cursor_pos = Some(self.items.len() -1);
+    }
+
+    pub fn to_top(&mut self) {
+        self.cursor_pos = Some(0);
     }
 
     pub fn push(&mut self, item: T) {
@@ -52,6 +63,14 @@ impl<T> ScrollContainer<T> {
         }
     }
 
+    pub fn selection_mut(&mut self) -> Option<(usize, &mut T)> {
+        if let Some(cursor_pos) = self.cursor_pos {
+            Some((cursor_pos, &mut self.items[cursor_pos]))
+        } else {
+            None
+        }
+    }
+
     // same as selection but it consumes the items (must be reset using `replace_items`) to return an owned item
     pub fn consume_selection(&mut self) -> Option<(usize, T)> {
         if let Some(cursor_pos) = self.cursor_pos {
@@ -75,15 +94,17 @@ impl<T> ScrollContainer<T> {
         let mut text = Text::default();
         for (idx, item) in self.items.iter().enumerate() {
             let mut line = Line::from((f)(item));
-            if self.cursor_pos.map_or(false, |cursor_pos| cursor_pos == idx) {
+            if self.cursor_pos.map_or(false, |cursor_pos| cursor_pos == idx) & self.is_focused {
                 line = line.bold();
+            } else {
+                line = line.not_bold();
             }
             text.push_line(line);
         }
         
         let sub_area = if let Some(cursor_pos) = self.cursor_pos {
             let block_inner = block.inner(area);
-            Rect::new(block_inner.x, block_inner.y - cursor_pos as u16, block_inner.width, 1)
+            Rect::new(block_inner.x, block_inner.y + cursor_pos as u16, block_inner.width, 1)
         } else {
             block.inner(area)
         };
@@ -128,11 +149,12 @@ impl<T> ScrollContainer<T> {
     pub fn focus(&mut self) {
         if self.cursor_pos.is_none() {
             self.cursor_pos = Some(0);
-        }    
+        }
+        self.is_focused = true;
     }
 
     pub fn unfocus(&mut self) {
-        self.cursor_pos = None;
+        self.is_focused = false;
     }
 }
 
@@ -166,7 +188,7 @@ impl InputWidget for TextEntry {
         }
         line.left_aligned()
             .render(area, buf);
-        area
+        area.resize(Size::new(self.max_size as u16, 1))
     }
 
     fn handle_event(&mut self, event: Event) -> Option<StateChange> {
