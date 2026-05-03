@@ -41,7 +41,9 @@ impl<T> ScrollContainer<T> {
     pub fn remove(&mut self) -> T {
         if let Some(cursor_pos) = &mut self.cursor_pos {
             let out = self.items.remove(*cursor_pos);
-            *cursor_pos -= 1;
+            if *cursor_pos != 0 {
+                *cursor_pos -= 1;
+            }
             out
         } else {
             panic!("Can't remove from an unselected ScrollContainer")
@@ -51,7 +53,11 @@ impl<T> ScrollContainer<T> {
     pub fn replace_items(&mut self, items: Vec<T>) {
         self.items = items;
         if let Some(cursor_pos) = self.cursor_pos {
-            self.cursor_pos = Some(cursor_pos.min(self.items.len()));
+            if self.items.len() == 0 {
+                self.cursor_pos = None;
+            } else {
+                self.cursor_pos = Some(cursor_pos.min(self.items.len() -1));
+            }
         }
     }
 
@@ -108,6 +114,7 @@ impl<T> ScrollContainer<T> {
         } else {
             block.inner(area)
         };
+        Clear.render(area, buf);
         Paragraph::new(text)
             .block(block)
             .render(area, buf);
@@ -119,21 +126,29 @@ impl<T> ScrollContainer<T> {
             if !key_event.is_press() {return None}
             match key_event.code {
                 down!() => {
-                    if let Some(cursor_pos) = &mut self.cursor_pos {
-                        *cursor_pos += 1;
-                        *cursor_pos %= self.items.len();
+                    if self.items.len() > 1 {
+                        if let Some(cursor_pos) = &mut self.cursor_pos {
+                            *cursor_pos += 1;
+                            *cursor_pos %= self.items.len();
+                        } else {
+                            self.cursor_pos = Some(0);
+                        }
                     } else {
-                        self.cursor_pos = Some(0);
+                        self.cursor_pos = None;
                     }
                     return Some(StateChange::Blank);
                 }
                 up!() => {
-                    if let Some(cursor_pos) = &mut self.cursor_pos {
-                        *cursor_pos += self.items.len();
-                        *cursor_pos -= 1;
-                        *cursor_pos %= self.items.len();
+                    if self.items.len() > 1 {
+                        if let Some(cursor_pos) = &mut self.cursor_pos {
+                            *cursor_pos += self.items.len();
+                            *cursor_pos -= 1;
+                            *cursor_pos %= self.items.len();
+                        } else {
+                            self.cursor_pos = Some(0);
+                        }
                     } else {
-                        self.cursor_pos = Some(0);
+                        self.cursor_pos = None;
                     }
                     return Some(StateChange::Blank);
                 }
@@ -147,7 +162,7 @@ impl<T> ScrollContainer<T> {
     }
 
     pub fn focus(&mut self) {
-        if self.cursor_pos.is_none() {
+        if self.cursor_pos.is_none() & (self.items.len() > 0) {
             self.cursor_pos = Some(0);
         }
         self.is_focused = true;
@@ -186,6 +201,7 @@ impl InputWidget for TextEntry {
                 line.push_span(' '.reversed());
             }
         }
+        Clear.render(area, buf);
         line.left_aligned()
             .render(area, buf);
         area.resize(Size::new(self.max_size as u16, 1))

@@ -200,7 +200,7 @@ macro_rules! bounded_usize {
 ///     read perms: DefaultedIdSet
 /// 
 /// 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct Entry {
     pub header_data: HeaderData,
     pub entry_data: EntryData,
@@ -227,7 +227,7 @@ impl AsData for Entry {
     }
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct HeaderData {
     pub version: u8,
     pub parent_id: u64,
@@ -286,7 +286,7 @@ impl HeaderData {
     }
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub enum DefaultBase {
     Inherit,
     White,
@@ -340,7 +340,7 @@ impl std::fmt::Display for DefaultBase {
 /// White:
 ///     number of blacklist_ids (u32)
 ///     blacklisted id 1 - n (u64 each)
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub enum DefaultedIdSet {
     Inherit{whitelist_ids: Vec<u64>, blacklist_ids: Vec<u64>},
     White{blacklist_ids: Vec<u64>},
@@ -444,7 +444,7 @@ impl AsData for DefaultedIdSet {
     }
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub enum EntryData {
     Message {
         timestamp: u64,

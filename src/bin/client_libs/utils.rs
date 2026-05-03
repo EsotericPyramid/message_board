@@ -24,7 +24,7 @@ pub fn read_long_hex_string(string: &str) -> Result<Vec<u8>, DataError> {
         let mut byte_string = String::with_capacity(2);
         byte_string.push(char1);
         byte_string.push(char2);
-        data.push(u8::from_str_radix(&byte_string, 16).map_err(|_| DataError::NonChild)?);
+        data.push(u8::from_str_radix(&byte_string, 16).map_err(|_| DataError::NotHex)?);
     }
     Ok(data)
 }
@@ -88,6 +88,8 @@ pub trait InputWidget {
 
     fn handle_event(&mut self, event: Event) -> Option<StateChange>;
     // these functions may not mean anything for some widgets
+    fn reload(&mut self) -> Result<(), DataError> {Ok(())}
+
     fn focus(&mut self) {}
     fn unfocus(&mut self) {}
 
@@ -257,6 +259,17 @@ pub enum ClientState {
 }
 
 impl InputWidget for ClientState {
+    fn reload(&mut self) -> Result<(), DataError> {
+        match self {
+            ClientState::Viewer(viewer) => viewer.reload(),
+            ClientState::WriteVarientSelection(selector) => selector.reload(),
+            ClientState::TextEntry(entry) => entry.reload(),
+            ClientState::AccessGroupIdList(id_list) => id_list.reload(),
+            ClientState::Error(..) => Ok(()),
+            ClientState::Blank => Err(internal_error!()),
+        }
+    }
+
     fn render(&self, area: Rect, buf: &mut Buffer) -> Rect {
         match self {
             ClientState::Viewer(viewer) => viewer.render(area, buf),
