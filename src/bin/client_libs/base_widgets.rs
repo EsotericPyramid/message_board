@@ -239,7 +239,7 @@ impl InputWidget for TextEntry {
     }
 
     fn consume_child(&mut self, child: ClientState) -> Option<StateChange> {
-        if let ClientState::Blank | ClientState::Error(_) = child {} else {
+        if let ClientState::Error(_) = child {} else {
             eprintln!("unexpected child of EntryVariantSelector")
         }
         None

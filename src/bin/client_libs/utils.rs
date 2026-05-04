@@ -254,7 +254,6 @@ pub enum ClientState {
     WriteVarientSelection(EntryVariantSelector),
     TextEntry(TextEntry),
     AccessGroupIdList(AccessGroupIdList),
-    Blank,
     Error(Vec<DataError>),
 }
 
@@ -266,7 +265,6 @@ impl InputWidget for ClientState {
             ClientState::TextEntry(entry) => entry.reload(),
             ClientState::AccessGroupIdList(id_list) => id_list.reload(),
             ClientState::Error(..) => Ok(()),
-            ClientState::Blank => Err(internal_error!()),
         }
     }
 
@@ -293,10 +291,6 @@ impl InputWidget for ClientState {
                 Paragraph::new(text).block(block).render(error_popup_area, buf);
                 error_popup_area
             }
-            ClientState::Blank => {
-                eprintln!("attempted to display a Blank ClientState, this should never be displayed during proper functioning");
-                area
-            }
         }
     }
 
@@ -306,7 +300,7 @@ impl InputWidget for ClientState {
             ClientState::WriteVarientSelection(selector) => selector.handle_event(event),
             ClientState::TextEntry(entry) => entry.handle_event(event),
             ClientState::AccessGroupIdList(id_list) => id_list.handle_event(event),
-            ClientState::Blank | ClientState::Error(_) => {Some(StateChange::Pop)},
+            ClientState::Error(_) => {Some(StateChange::Pop)},
         }
     }
 
@@ -316,7 +310,7 @@ impl InputWidget for ClientState {
             ClientState::WriteVarientSelection(selector) => selector.focus(),
             ClientState::TextEntry(entry) => entry.focus(),
             ClientState::AccessGroupIdList(id_list) => id_list.focus(),
-            ClientState::Blank | ClientState::Error(_) => {},
+            ClientState::Error(_) => {},
         }
     }
     fn unfocus(&mut self) {
@@ -325,7 +319,7 @@ impl InputWidget for ClientState {
             ClientState::WriteVarientSelection(selector) => selector.unfocus(),
             ClientState::TextEntry(entry) => entry.unfocus(),
             ClientState::AccessGroupIdList(id_list) => id_list.unfocus(),
-            ClientState::Blank | ClientState::Error(_) => {},
+            ClientState::Error(_) => {},
         }
     }
 
@@ -335,7 +329,7 @@ impl InputWidget for ClientState {
             ClientState::WriteVarientSelection(selector) => selector.consume_child(child),
             ClientState::TextEntry(entry) => entry.consume_child(child),
             ClientState::AccessGroupIdList(id_list) => id_list.consume_child(child),
-            ClientState::Blank | ClientState::Error(_) => {Some(StateChange::Pop)},
+            ClientState::Error(_) => {Some(StateChange::Pop)},
         }
     }
 }

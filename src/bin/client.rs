@@ -257,7 +257,7 @@ impl InputWidget for Navigator {
     fn unfocus(&mut self) {self.0.unfocus();}
 
     fn consume_child(&mut self, child: ClientState) -> Option<StateChange> {
-        if let ClientState::Blank | ClientState::Error(_) = child {} else {
+        if let ClientState::Error(_) = child {} else {
             eprintln!("unexpected child of Naviagator")
         }
         None
@@ -314,7 +314,7 @@ impl InputWidget for EntryVariantSelector {
     fn unfocus(&mut self) {self.selector.unfocus();}
 
     fn consume_child(&mut self, child: ClientState) -> Option<StateChange> {
-        if let ClientState::Blank | ClientState::Error(_) = child {} else {
+        if let ClientState::Error(_) = child {} else {
             eprintln!("unexpected child of EntryVariantSelector")
         }
         None
@@ -393,7 +393,7 @@ impl InputWidget for IdList {
                     }
                     return Some(StateChange::Blank);
                 }
-                ClientState::Blank | ClientState::Error(_) => {}
+                ClientState::Error(_) => {}
                 _ => {eprintln!("unexpected child of Naviagator")}
             }
             None
@@ -706,11 +706,11 @@ impl InputWidget for EntryViewer {
                         let _ = std::mem::replace(id_lists[access_group_list.idx], new_id_list);
                     }
                 }
-                (_, ClientState::Blank | ClientState::Error(_)) => {}
+                (_, ClientState::Error(_)) => {}
                 _ => eprintln!("Unexpected child of EntryViewer"),
             }
         } else {
-            if let ClientState::Blank | ClientState::Error(_) = child {} else {
+            if let ClientState::Error(_) = child {} else {
                 eprintln!("Unexpected child of EntryViewer")
             }
         }
@@ -974,7 +974,7 @@ impl InputWidget for EntryTreeViewer {
                             }
                         }
                     }
-                    ClientState::Blank | ClientState::Error(_) => {}
+                    ClientState::Error(_) => {}
                     _ => matched = false,
                 }
                 if matched {Some(StateChange::Blank)} else {None}
@@ -1038,7 +1038,6 @@ impl Client {
                         let state_end = self.state.len() -1;
                         self.state[state_end].unfocus();
                     }
-                    if let ClientState::Blank = new_state {return}
                     new_state.focus();
                     self.state.push(new_state);
                 }
@@ -1052,18 +1051,14 @@ impl Client {
                     }
                 }
                 StateChange::Swap(new_state) => {
-                    if let ClientState::Blank = new_state {
-                        self.handle_state_change(Some(StateChange::Pop));
-                    } else {
-                        // NOTE: can't swap this out for the `handle_state_change` to avoid termination if only 1 state on the stack
-                        let child_state = self.state.pop().expect("Shouldn't pop off a state when there are no states");
-                        if self.state.len() > 0 {
-                            let state_end = self.state.len() -1; // aside: lifetimes are cool but sometimes they are just feel dumb :(
-                            self.state[state_end].consume_child(child_state);
-                            self.state[state_end].focus();
-                        }
-                        self.handle_state_change(Some(StateChange::Push(new_state)));
+                    // NOTE: can't swap this out for the `handle_state_change` to avoid termination if only 1 state on the stack
+                    let child_state = self.state.pop().expect("Shouldn't pop off a state when there are no states");
+                    if self.state.len() > 0 {
+                        let state_end = self.state.len() -1; // aside: lifetimes are cool but sometimes they are just feel dumb :(
+                        self.state[state_end].consume_child(child_state);
+                        self.state[state_end].focus();
                     }
+                    self.handle_state_change(Some(StateChange::Push(new_state)));
                 }
                 _ => {}
             }
