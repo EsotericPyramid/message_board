@@ -32,7 +32,7 @@ use client_libs::base_widgets::*;
 
 
 struct Config {
-    user_id: Option<u64>,
+    user_id: Option<UserId>,
     user_aead: Option<UserAeadKey>,
     server_address: String,
 }
@@ -41,7 +41,7 @@ impl Config {
     fn from_toml(config_toml: &toml::Table) -> Self {
         let user_id_val = &config_toml["user_id"];
         let user_id = match user_id_val {
-            toml::Value::Integer(id) => Some(*id as u64), //scuff
+            toml::Value::Integer(id) => Some((*id as u64).into()), //scuff
             toml::Value::String(str) if str == "None" => None,
             _ => {panic!("The client RC file was misformatted")}
         };
@@ -66,7 +66,7 @@ impl Config {
     fn into_toml(self) -> toml::Table {
         let mut config_toml = toml::Table::new();
         let user_id = match self.user_id {
-            Some(id) => toml::Value::Integer(id as i64),
+            Some(id) => toml::Value::Integer(u64::from(id) as i64),
             None => toml::Value::String(String::from("None")),
         };
         config_toml.insert(String::from("user_id"), user_id);
@@ -323,11 +323,11 @@ impl InputWidget for EntryVariantSelector {
 
 #[derive(Debug)]
 struct IdList {
-    container: ScrollContainer<Option<u64>>,
+    container: ScrollContainer<Option<UserId>>,
 }
 
 impl IdList {
-    fn new(ids: Vec<u64>) -> Self {
+    fn new(ids: Vec<UserId>) -> Self {
         Self {
             container: ScrollContainer::new(ids.into_iter().map(|x| Some(x)).collect()),
         }
@@ -338,7 +338,7 @@ impl IdList {
 impl InputWidget for IdList {
     fn render(&self, area: Rect, buf: &mut Buffer) -> Rect {
         self.container.base_render(area, buf, " id list (temp name) ", |x| 
-            if let Some(x) = x {format!("{:016X}", x)} else {String::from("NONE (note: this should never be seen)")}
+            if let Some(x) = x {x.to_string()} else {String::from("NONE (note: this should never be seen)")}
         )
     }
     
@@ -384,7 +384,7 @@ impl InputWidget for IdList {
                     let Ok(new_id) = u64::from_str_radix(text, 16) else {
                         return Some(StateChange::Push(ClientState::Error(vec![internal_error!()])));
                     };
-                    let new_id = Some(new_id);
+                    let new_id = Some(new_id.into());
                     if !id_list.container.items.contains(&new_id) {
                         let Some((_, new_id_slot)) = id_list.container.selection_mut() else {
                             return Some(StateChange::Push(ClientState::Error(vec![internal_error!()])));
@@ -420,11 +420,11 @@ struct EntryViewer {
     y_size: usize,
 
     is_focused: bool,
-    viewer_user_id: u64,
+    viewer_user_id: UserId,
 }
 
 impl EntryViewer {
-    fn new(user_id: u64) -> Self {
+    fn new(user_id: UserId) -> Self {
         Self {
             entry: None,
             has_mutated: false,
@@ -503,7 +503,7 @@ impl InputWidget for EntryViewer {
                 match &entry.entry_data {
                     EntryData::Message { timestamp, message } => {
                         title.push_span(" Message by ");
-                        title.push_span(format!("{:016X}", entry.header_data.author_id));
+                        title.push_span(entry.header_data.author_id.to_string());
                         title.push_span(", written/editted ");
                         title.push_span(chrono::DateTime::from_timestamp_secs(*timestamp as i64).unwrap().to_string());
                         title.push_span(" ");
@@ -512,9 +512,14 @@ impl InputWidget for EntryViewer {
                         area
                     }
                     EntryData::AccessGroup { name, write_perms, read_perms } => {
-                        title.push_span(" Access Group - ");
+                        title.push_span(" Access Group: ");
                         title.push_span(name);
+                        title.push_span(", owned by ");
+                        title.push_span(entry.header_data.author_id.to_string());
                         title.push_span(" ");
+                        if entry.header_data.author_id == self.viewer_user_id {
+                            title.push_span("(Self) ");
+                        }
                         let write_read_titles = [String::from(" Write (Base: "), String::from(" Read (Base: ")];
                         let write_read_layout = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).split(inner_area);
                         let mut x = 0;
@@ -534,7 +539,7 @@ impl InputWidget for EntryViewer {
                                     for id in whitelist_ids {
                                         let mut line = Line::default();
                                         line.push_span(" -  ".bold());
-                                        line.push_span(format!("{:016X}", id));
+                                        line.push_span(id.to_string());
                                         whitelist.push_line(line);
                                     }
                                     let mut blacklist = Text::default();
@@ -544,7 +549,7 @@ impl InputWidget for EntryViewer {
                                     for id in blacklist_ids {
                                         let mut line = Line::default();
                                         line.push_span(" -  ".bold());
-                                        line.push_span(format!("{:016X}", id));
+                                        line.push_span(id.to_string());
                                         blacklist.push_line(line);
                                     }
                                     whitelist.render(layout[0], buf);
@@ -558,7 +563,7 @@ impl InputWidget for EntryViewer {
                                     for id in blacklist_ids {
                                         let mut line = Line::default();
                                         line.push_span(" -  ".bold());
-                                        line.push_span(format!("{:016X}", id));
+                                        line.push_span(id.to_string());
                                         blacklist.push_line(line);
                                     }
                                     blacklist.render(perm_set_area, buf);
@@ -571,7 +576,7 @@ impl InputWidget for EntryViewer {
                                     for id in whitelist_ids {
                                         let mut line = Line::default();
                                         line.push_span(" -  ".bold());
-                                        line.push_span(format!("{:016X}", id));
+                                        line.push_span(id.to_string());
                                         whitelist.push_line(line);
                                     }
                                     whitelist.render(perm_set_area, buf);

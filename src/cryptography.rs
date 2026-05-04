@@ -430,7 +430,7 @@ pub fn read_from_full_anonymous_block(kem_dk: &DecapsulationKey, input_stream: &
     Ok((aead, aead_pt))
 }
 
-pub fn extend_with_user_block(mut rng: impl OldCryptoRng + OldRngCore, keys: &mut PublicKeySet, user_id: u64, output_stream: &mut Vec<u8>, to_encrypt: &[u8]) -> Result<(), DataError> {
+pub fn extend_with_user_block(mut rng: impl OldCryptoRng + OldRngCore, keys: &mut PublicKeySet, user_id: UserId, output_stream: &mut Vec<u8>, to_encrypt: &[u8]) -> Result<(), DataError> {
     let Some(aead) = &mut keys.user_aead else {return Err(DataError::MissingKey);};
     let Some(kem) = &keys.kem else {return Err(DataError::MissingKey);};
     // todo: see if I want to use any associated data
@@ -447,11 +447,10 @@ pub fn extend_with_user_block(mut rng: impl OldCryptoRng + OldRngCore, keys: &mu
     Ok(())
 }
 
-pub fn read_from_user_block<'a, F: FnOnce(u64) -> Option<T>, T: Deref<Target = UserAeadKey> + DerefMut>(kem_dk: &DecapsulationKey, input_stream: &mut impl Iterator<Item = u8>, get_user_aead: F) -> Result<(u64, Vec<u8>), DataError> {
-
+pub fn read_from_user_block<'a, F: FnOnce(UserId) -> Option<T>, T: Deref<Target = UserAeadKey> + DerefMut>(kem_dk: &DecapsulationKey, input_stream: &mut impl Iterator<Item = u8>, get_user_aead: F) -> Result<(UserId, Vec<u8>), DataError> {
     let kem_ct = KemCipherText::from_data_iter(input_stream)?;
     let mut packed_kem_sk = kem_dk.decapsulate(kem_ct, 8 + 16)?;
-    let user_id = read_u64(&mut packed_kem_sk)?;
+    let user_id = read_u64(&mut packed_kem_sk)?.into();
     let nonce = read_u128(&mut packed_kem_sk)? & AEAD_NONCE_MAX;
     let aead = &mut *get_user_aead(user_id).map_or(Err(DataError::MissingKey), |x| Ok(x))?;
     let aead_len = read_u64(input_stream)? as usize;

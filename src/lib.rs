@@ -1,9 +1,12 @@
+use std::borrow::{Borrow, BorrowMut};
 use std::collections::VecDeque;
+use std::fmt::Display;
 use std::ops::{Deref, DerefMut};
 use std::string::FromUtf8Error;
 
 use crate::cryptography::*;
 
+use log::info;
 // this is the 0.6.4 version, vs the 0.10.0 version from the rand crate
 use rand_chacha::rand_core::RngCore as OldRngCore;
 use rand_chacha::rand_core::CryptoRng as OldCryptoRng; 
@@ -12,6 +15,16 @@ pub const PORT: u16 = 8000;
 pub const ROOT_ID: u64 = 0x00_00_00_00_00_00_00_00;
 pub const ENTRY_MAGIC_NUMBER: u16 = 0x1234;
 pub const USER_MAGIC_NUMBER: u16 = 0x1470;
+
+pub const SERVER_USER_ID: u64 = 0;
+pub const ADMIN_USER_ID: u64 = 1;
+pub const ANONYMOUS_USER_ID: u64 = 2;
+
+pub const RESERVED_USER_IDS: [u64; 3] = [
+    SERVER_USER_ID, 
+    ADMIN_USER_ID,
+    ANONYMOUS_USER_ID,
+];
 
 /// file versions
 pub const ENTRY_FILE_VERSION: u8 = 0x00;
@@ -45,6 +58,57 @@ pub const INHERIT_BASE: u8 = 0x00;
 pub const WHITE_BASE: u8 = 0x01;
 pub const BLACK_BASE: u8 = 0x02;
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+pub struct UserId(u64);
+
+impl From<u64> for UserId {
+    fn from(value: u64) -> Self {Self(value)}
+}
+
+impl From<UserId> for u64 {
+    fn from(value: UserId) -> Self {value.0}
+}
+
+impl Deref for UserId {
+    type Target = u64;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for UserId {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl AsRef<u64> for UserId {
+    fn as_ref(&self) -> &u64 {&self.0}
+}
+
+impl AsMut<u64> for UserId {
+    fn as_mut(&mut self) -> &mut u64 {&mut self.0}
+}
+
+impl Borrow<u64> for UserId {
+    fn borrow(&self) -> &u64 {&self.0}
+}
+
+impl BorrowMut<u64> for UserId {
+    fn borrow_mut(&mut self) -> &mut u64 {&mut self.0}
+}
+
+impl Display for UserId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", match self.0 {
+            SERVER_USER_ID => "Server",
+            ADMIN_USER_ID => "Admin",
+            ANONYMOUS_USER_ID => "Anon",
+            _ => return write!(f, "{:016X}", self.0)
+        })
+    }
+}
 
 pub mod cryptography;
 
@@ -232,7 +296,7 @@ pub struct HeaderData {
     pub version: u8,
     pub parent_id: u64,
     pub children_ids: Vec<u64>,
-    pub author_id: u64,
+    pub author_id: UserId,
 }
 
 impl HeaderData {
@@ -259,7 +323,7 @@ impl HeaderData {
             children_ids.push(read_u64(data_iter)?);
         }
 
-        let author_id = read_u64(data_iter)?;
+        let author_id = read_u64(data_iter)?.into();
         Ok((HeaderData { version, parent_id, children_ids, author_id }, entry_type))
     }
 
@@ -342,13 +406,13 @@ impl std::fmt::Display for DefaultBase {
 ///     blacklisted id 1 - n (u64 each)
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub enum DefaultedIdSet {
-    Inherit{whitelist_ids: Vec<u64>, blacklist_ids: Vec<u64>},
-    White{blacklist_ids: Vec<u64>},
-    Black{whitelist_ids: Vec<u64>},
+    Inherit{whitelist_ids: Vec<UserId>, blacklist_ids: Vec<UserId>},
+    White{blacklist_ids: Vec<UserId>},
+    Black{whitelist_ids: Vec<UserId>},
 }
 
 impl DefaultedIdSet {
-    pub fn contains(&self, id: u64) -> Option<bool> {
+    pub fn contains(&self, id: UserId) -> Option<bool> {
         match self {
             Self::Inherit { whitelist_ids, blacklist_ids } => {
                 let whitelisted = whitelist_ids.contains(&id);
@@ -379,11 +443,11 @@ impl DefaultedIdSet {
 
 impl AsData for DefaultedIdSet {
     fn from_data_iter(data_iter: &mut impl Iterator<Item = u8>) -> Result<Self, DataError> {
-        fn read_vec(data_iter: &mut impl Iterator<Item = u8>) -> Result<Vec<u64>, DataError> {
+        fn read_vec(data_iter: &mut impl Iterator<Item = u8>) -> Result<Vec<UserId>, DataError> {
             let len = read_u32(data_iter)? as usize;
             let mut vec = Vec::with_capacity(len);
             for _ in 0..len {
-                vec.push(read_u64(data_iter)?);
+                vec.push(read_u64(data_iter)?.into());
             }
             Ok(vec)
         }
@@ -406,7 +470,7 @@ impl AsData for DefaultedIdSet {
     }
 
     fn extend_data(&self, data: &mut Vec<u8>) -> Result<(), DataError> {
-        fn write_vec(vec: &[u64], data: &mut Vec<u8>) -> Result<(), DataError> {
+        fn write_vec(vec: &[UserId], data: &mut Vec<u8>) -> Result<(), DataError> {
             bounded_usize!(vec.len(), u32)?;
             data.extend_from_slice(&(vec.len() as u32).to_le_bytes());
             data.extend(vec.iter().flat_map(|x| x.to_le_bytes()));
@@ -640,7 +704,7 @@ impl AsData for PublicKeySet {
 pub enum ReEncryptionData {
     Exposed,
     FullAnonymous(SimpleAeadKey),
-    User(u64),
+    User(UserId),
 }
 
 /// data format:
@@ -668,10 +732,10 @@ pub enum ReEncryptionData {
 ///     - no data -
 #[derive(PartialEq, Eq, Debug)]
 pub enum BoardRequest {
-    GetEntry { user_id: u64, entry_id: u64 },
-    AddEntry { user_id: u64, entry: Entry },
-    EditEntry { user_id: u64, entry_id: u64, entry: Entry },
-    GetUser { user_id: u64 },
+    GetEntry { user_id: UserId, entry_id: u64 },
+    AddEntry { user_id: UserId, entry: Entry },
+    EditEntry { user_id: UserId, entry_id: u64, entry: Entry },
+    GetUser { user_id: UserId },
     AddUser,
     GetKemEk,
 }
@@ -713,24 +777,24 @@ impl AsData for BoardRequest {
         Ok(match discriminant {
             // entry requests
             GET_ENTRY => { // GetEntry
-                let user_id = read_u64(data_iter)?;
+                let user_id = read_u64(data_iter)?.into();
                 let entry_id = read_u64(data_iter)?;
                 BoardRequest::GetEntry { user_id, entry_id }
             }
             ADD_ENTRY => { // AddEntry
-                let user_id = read_u64(data_iter)?;
+                let user_id = read_u64(data_iter)?.into();
                 let entry = Entry::from_data_iter(data_iter)?;
                 BoardRequest::AddEntry { user_id, entry }
             }
             EDIT_ENTRY => {
-                let user_id = read_u64(data_iter)?;
+                let user_id = read_u64(data_iter)?.into();
                 let entry_id = read_u64(data_iter)?;
                 let entry = Entry::from_data_iter(data_iter)?;
                 BoardRequest::EditEntry { user_id, entry_id, entry }
             }
             // user requests
             GET_USER => { // GetUser
-                let user_id = read_u64(data_iter)?;
+                let user_id = read_u64(data_iter)?.into();
                 BoardRequest::GetUser { user_id }
             }
             ADD_USER => { // AddUser
@@ -850,7 +914,7 @@ impl BoardRequest {
         Ok(out)
     }
 
-    pub fn secure_from_data_iter<'a, F: FnOnce(u64) -> Option<T>, T: Deref<Target = UserAeadKey> + DerefMut>(kem_dk: &DecapsulationKey, get_user_aead: F, data_iter: &mut impl Iterator<Item = u8>) -> Result<(ReEncryptionData, Self), DataError> {
+    pub fn secure_from_data_iter<'a, F: FnOnce(UserId) -> Option<T>, T: Deref<Target = UserAeadKey> + DerefMut>(kem_dk: &DecapsulationKey, get_user_aead: F, data_iter: &mut impl Iterator<Item = u8>) -> Result<(ReEncryptionData, Self), DataError> {
         if read_u8(data_iter)? != REQUEST_FORMAT_VERSION {return Err(DataError::UnsupportedVersion)}
         let mut user_id = None;
         let (re_encryptor, body) = match read_u8(data_iter)? {
@@ -888,7 +952,7 @@ impl BoardRequest {
             }
             // user requests
             GET_USER => { // GetUser
-                let user_id = read_u64(&mut body)?;
+                let user_id = read_u64(&mut body)?.into();
                 BoardRequest::GetUser { user_id }
             }
             ADD_USER => { // AddUser
@@ -902,7 +966,7 @@ impl BoardRequest {
         }))
     }
 
-    pub fn secure_from_data<'a, F: FnOnce(u64) -> Option<T>, T: Deref<Target = UserAeadKey> + DerefMut>(kem_dk: &DecapsulationKey, get_user_aead: F, data: &[u8]) -> Result<(ReEncryptionData, Self), DataError> {
+    pub fn secure_from_data<'a, F: FnOnce(UserId) -> Option<T>, T: Deref<Target = UserAeadKey> + DerefMut>(kem_dk: &DecapsulationKey, get_user_aead: F, data: &[u8]) -> Result<(ReEncryptionData, Self), DataError> {
         Self::secure_from_data_iter(kem_dk, get_user_aead, &mut data.into_iter().copied())
     }
 }
@@ -915,7 +979,7 @@ pub enum BoardResponse {
     EditEntry,
 
     GetUser(UserData),
-    AddUser{user_id: u64, user_aead: UserAeadKey},
+    AddUser{user_id: UserId, user_aead: UserAeadKey},
 
     GetKemEk(EncapsulationKey),
     
@@ -983,7 +1047,7 @@ impl AsData for BoardResponse {
                 kem_ek.extend_data(data)?;
             }
             BoardResponse::Error(e) => { // TODO: should consider the error
-                eprintln!("Sending Error: {:?}", e);
+                info!("Sending Error: {:?}", e);
                 data.push(ERROR);
             }
         }
@@ -1010,7 +1074,7 @@ impl AsData for BoardResponse {
                 BoardResponse::GetUser(user)
             }
             ADD_USER => { // AddUser
-                let user_id = read_u64(data_iter)?;
+                let user_id = read_u64(data_iter)?.into();
                 let user_aead = UserAeadKey::from_data_iter(data_iter)?;
                 BoardResponse::AddUser{user_id, user_aead}
             }
@@ -1080,7 +1144,7 @@ impl AsData for BoardResponse {
 /// Error, 0xff:
 ///     - no data - 
 impl BoardResponse {
-    pub fn secure_extend_data<'a, F: FnOnce(u64) -> Option<T>, T: Deref<Target = UserAeadKey> + DerefMut>(&self, rng: impl OldCryptoRng + OldRngCore, re_encryptor: ReEncryptionData, data: &mut Vec<u8>, get_user_aead: F) -> Result<(), DataError> {
+    pub fn secure_extend_data<'a, F: FnOnce(UserId) -> Option<T>, T: Deref<Target = UserAeadKey> + DerefMut>(&self, rng: impl OldCryptoRng + OldRngCore, re_encryptor: ReEncryptionData, data: &mut Vec<u8>, get_user_aead: F) -> Result<(), DataError> {
         data.push(RESPONSE_FORMAT_VERSION);
         let mut body = Vec::new();
         match self {
@@ -1109,7 +1173,7 @@ impl BoardResponse {
                 kem_ek.extend_data(&mut body)?;
             }
             BoardResponse::Error(e) => { // TODO: should consider the error
-                eprintln!("Sending Error: {:?}", e);
+                info!("Sending Error: {:?}", e);
                 body.push(ERROR);
             }
         }
@@ -1131,7 +1195,7 @@ impl BoardResponse {
         Ok(())
     }
 
-    pub fn secure_into_data<'a, F: FnOnce(u64) -> Option<T>, T: Deref<Target = UserAeadKey> + DerefMut>(&self, rng: impl OldCryptoRng + OldRngCore, re_encryptor: ReEncryptionData, get_user_aead: F) -> Result<Vec<u8>, DataError> {
+    pub fn secure_into_data<'a, F: FnOnce(UserId) -> Option<T>, T: Deref<Target = UserAeadKey> + DerefMut>(&self, rng: impl OldCryptoRng + OldRngCore, re_encryptor: ReEncryptionData, get_user_aead: F) -> Result<Vec<u8>, DataError> {
         let mut out = Vec::new();
         self.secure_extend_data(rng, re_encryptor, &mut out, get_user_aead)?;
         Ok(out)
@@ -1176,7 +1240,7 @@ impl BoardResponse {
                 BoardResponse::GetUser(user)
             }
             ADD_USER => { // AddUser
-                let user_id = read_u64(&mut body)?;
+                let user_id = read_u64(&mut body)?.into();
                 let user_aead = UserAeadKey::from_data_iter(&mut body)?;
                 BoardResponse::AddUser{user_id, user_aead}
             }

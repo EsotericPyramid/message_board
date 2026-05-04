@@ -45,20 +45,20 @@ fn rand_defaulted_id_set(mut rng: impl Rng, _char_rng: impl Iterator<Item = char
             let num_whitelisted = rng.random_range(10..1000);
             let num_blacklisted = rng.random_range(10..1000);
             DefaultedIdSet::Inherit { 
-                whitelist_ids: (&mut rng).random_iter().take(num_whitelisted).collect(), 
-                blacklist_ids: (&mut rng).random_iter().take(num_blacklisted).collect(),
+                whitelist_ids: (&mut rng).random_iter().take(num_whitelisted).map(|x: u64| x.into()).collect(), 
+                blacklist_ids: (&mut rng).random_iter().take(num_blacklisted).map(|x: u64| x.into()).collect(),
             }
         }
         DefaultBase::Black => {
             let num_whitelisted = rng.random_range(10..1000);
             DefaultedIdSet::Black {
-                whitelist_ids: (&mut rng).random_iter().take(num_whitelisted).collect(),
+                whitelist_ids: (&mut rng).random_iter().take(num_whitelisted).map(|x: u64| x.into()).collect(),
             }
         }
         DefaultBase::White => {
             let num_blacklisted = rng.random_range(10..1000);
             DefaultedIdSet::White { 
-                blacklist_ids: (&mut rng).random_iter().take(num_blacklisted).collect(),
+                blacklist_ids: (&mut rng).random_iter().take(num_blacklisted).map(|x: u64| x.into()).collect(),
             }
         }
     }
@@ -93,7 +93,7 @@ fn rand_entry(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>) -> En
             version: ENTRY_FILE_VERSION, 
             parent_id: rng.next_u64(), 
             children_ids, 
-            author_id: rng.next_u64(),
+            author_id: rng.next_u64().into(),
         },
     };
 
@@ -116,23 +116,23 @@ fn rand_user(mut rng: impl Rng, crypto_rng: impl OldCryptoRng + OldRngCore) -> U
 fn rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>) -> BoardRequest {
     match rng.random_range(0..5) {
         0 => {
-            let user_id = rng.next_u64();
+            let user_id = rng.next_u64().into();
             let entry_id = rng.next_u64();
             BoardRequest::GetEntry { user_id, entry_id }
         }
         1 => {
-            let user_id = rng.next_u64();
+            let user_id = rng.next_u64().into();
             let entry = rand_entry(&mut rng, &mut char_rng);
             BoardRequest::AddEntry { user_id, entry }
         }
         2 => {
-            let user_id = rng.next_u64();
+            let user_id = rng.next_u64().into();
             let entry_id = rng.next_u64();
             let entry = rand_entry(&mut rng, &mut char_rng);
             BoardRequest::EditEntry { user_id, entry_id, entry }
         }
         3 => {
-            let user_id = rng.next_u64();
+            let user_id = rng.next_u64().into();
             BoardRequest::GetUser { user_id }
         }
         4 => {
@@ -142,7 +142,7 @@ fn rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>) -> 
     }
 }
 
-fn new_rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>, sender_user_id: u64) -> BoardRequest {
+fn new_rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>, sender_user_id: UserId) -> BoardRequest {
     match rng.random_range(0..5) {
         0 => {
             let entry_id = rng.next_u64();
@@ -158,7 +158,7 @@ fn new_rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>,
             BoardRequest::EditEntry { user_id: sender_user_id, entry_id, entry }
         }
         3 => {
-            let user_id = rng.next_u64();
+            let user_id = rng.next_u64().into();
             BoardRequest::GetUser { user_id }
         }
         4 => {
@@ -184,7 +184,7 @@ fn rand_response(mut rng: impl Rng, char_rng: impl Iterator<Item = char>, crypto
         }
         4 => {
             BoardResponse::AddUser{
-                user_id: rng.next_u64(), 
+                user_id: rng.next_u64().into(), 
                 user_aead: UserAeadKey::new_random(crypto_rng)
             }
         }
@@ -195,7 +195,7 @@ fn rand_response(mut rng: impl Rng, char_rng: impl Iterator<Item = char>, crypto
     }
 }
 
-fn rand_re_encryptor(mut rng: impl Rng, crypto_rng: impl OldCryptoRng + OldRngCore, user_id: u64) -> ReEncryptionData {
+fn rand_re_encryptor(mut rng: impl Rng, crypto_rng: impl OldCryptoRng + OldRngCore, user_id: UserId) -> ReEncryptionData {
     match rng.random_range(0..3) {
         0 => ReEncryptionData::Exposed,
         1 => ReEncryptionData::FullAnonymous(SimpleAeadKey::new_random(crypto_rng)),
@@ -419,7 +419,7 @@ fn secure_board_request_data_conversion() {
     let mut char_rng = get_char_rng(rng.clone());
     let mut crypto_rng = get_crypto_rng();
 
-    let user_id = rng.random();
+    let user_id = rng.random::<u64>().into();
     let mut server_aead_key = UserAeadKey::new_random(&mut crypto_rng);
     let user_aead_key = server_aead_key.clone();
     let (kem_dk, kem_ek) = get_kem_set(&mut crypto_rng);
@@ -438,7 +438,7 @@ fn secure_board_batched_request_data_conversion() {
     let mut char_rng = get_char_rng(rng.clone());
     let mut crypto_rng = get_crypto_rng();
 
-    let user_id = rng.random();
+    let user_id = rng.random::<u64>().into();
     let mut server_aead_key = UserAeadKey::new_random(&mut crypto_rng);
     let user_aead_key = server_aead_key.clone();
     let (kem_dk, kem_ek) = get_kem_set(&mut crypto_rng);
@@ -464,7 +464,7 @@ fn secure_board_response_data_conversion() {
     let mut char_rng = get_char_rng(rng.clone());
     let mut crypto_rng = get_crypto_rng();
 
-    let user_id = rng.random();
+    let user_id = rng.random::<u64>().into();
     let mut servers_user_aead_key = UserAeadKey::new_random(&mut crypto_rng);
     let users_user_aead_key = servers_user_aead_key.clone();
 

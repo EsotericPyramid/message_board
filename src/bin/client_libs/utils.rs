@@ -100,7 +100,7 @@ pub trait InputWidget {
 #[derive(Debug)]
 pub struct MessageBoardConnection {
     stream: TcpStream,
-    user_id: Option<u64>,
+    user_id: Option<UserId>,
     keys: PublicKeySet,
     crypto_rng: CryptoRng,
 }
@@ -168,7 +168,7 @@ impl MessageBoardConnection {
         Ok(())
     }
 
-    pub fn get_user(&mut self, user_id: u64) -> Result<UserData, DataError> {
+    pub fn get_user(&mut self, user_id: UserId) -> Result<UserData, DataError> {
         let request = BoardRequest::GetUser { user_id };
         let response = self.send_request(request)?;
         let BoardResponse::GetUser(user) = response else {return Err(internal_error!())};
@@ -194,7 +194,7 @@ impl MessageBoardConnection {
         Ok(())
     }
 
-    pub fn get_user_id(&self) -> &Option<u64> {&self.user_id}
+    pub fn get_user_id(&self) -> &Option<UserId> {&self.user_id}
 }
 
 impl Drop for MessageBoardConnection {

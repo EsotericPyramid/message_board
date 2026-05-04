@@ -1,6 +1,8 @@
 use log::*;
 use message_board::cryptography::{get_crypto_rng, get_kem_set, DecapsulationKey, EncapsulationKey, UserAeadKey};
 use message_board::*;
+use std::borrow::Borrow;
+use std::hash::Hash;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read, Write};
 use std::net::*;
@@ -20,11 +22,6 @@ const RC_FILE: &str = ".config/message_board/server_rc.toml";
 
 const ROOT_ENTRY_ID: u64 = 0;
 
-const SERVER_USER_ID: u64 = 0;
-const ADMIN_USER_ID: u64 = 1;
-const ANONYMOUS_USER_ID: u64 = 2;
-
-const SERVER_RESERVED_USER_IDS: [u64; 2] = [SERVER_USER_ID, ADMIN_USER_ID];
 
 const SERVER_MAINLOOP_PERIOD: Duration = Duration::new(0, 1000000); // ie. 1 ms
 
@@ -35,7 +32,7 @@ struct StorageFile {
 
 struct GuardedUserAeadKey<'a> {
     board: &'a MessageBoard,
-    user_id: u64,
+    user_id: UserId,
     key: UserAeadKey,
 }
 
@@ -93,7 +90,7 @@ struct MessageBoard {
     address: String,
     file_dir: Box<Path>,
     entry_ids: RwLock<HashSet<u64>>,
-    user_ids: RwLock<HashSet<u64>>,
+    user_ids: RwLock<HashSet<UserId>>,
 }
 
 #[allow(unused)]
@@ -197,7 +194,7 @@ impl MessageBoard {
                 board.write_storage_file(storage);
 
                 let default_root = Entry {
-                    header_data: HeaderData { version: ENTRY_FILE_VERSION, parent_id: ROOT_ENTRY_ID, children_ids: Vec::new(), author_id: SERVER_USER_ID },
+                    header_data: HeaderData { version: ENTRY_FILE_VERSION, parent_id: ROOT_ENTRY_ID, children_ids: Vec::new(), author_id: SERVER_USER_ID.into() },
                     entry_data: EntryData::AccessGroup { name: String::from("Root"), write_perms: DefaultedIdSet::White { blacklist_ids: Vec::new() }, read_perms: DefaultedIdSet::White { blacklist_ids: Vec::new() }}
                 };
                 if board.write_entry(ROOT_ENTRY_ID, default_root).is_err_and(|e| if let DataError::AlreadyExists = e {false} else {true}) {
@@ -228,12 +225,12 @@ impl MessageBoard {
         Ok(())
     }
 
-    fn generate_unique_id<>(mut rng: impl Rng, used_ids: &HashSet<u64>) -> u64 {
+    fn generate_unique_id<ID: Eq + Hash + Borrow<u64> + From<u64>>(mut rng: impl Rng, used_ids: &HashSet<ID>) -> ID {
         let mut rand_num = rng.next_u64();
         while used_ids.contains(&rand_num) {
             rand_num += 1;
         }
-        rand_num
+        rand_num.into()
     }
 
     /// encapsulation method to get the raw, unparsed data of an entry in the form of an iter
@@ -248,9 +245,9 @@ impl MessageBoard {
     }
 
     /// encapsulation method to get a `UserData` of a `user_id`
-    fn get_user(&self, user_id: u64) -> Result<UserData, DataError> {
+    fn get_user(&self, user_id: UserId) -> Result<UserData, DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
-        path.push(format!("users/{:016X}", user_id));
+        path.push(format!("users/{}", user_id));
         UserData::from_data(&std::fs::read(path).map_err(|_| DataError::DoesNotExist)?)
     }
 
@@ -275,9 +272,9 @@ impl MessageBoard {
     /// encapsulation method to overwrite an updated `UserData` for `user_id`
     /// 
     /// requires that the user_id currently exists
-    fn overwrite_user_data(&self, user_id: u64, new_data: UserData) -> Result<(), DataError> {
+    fn overwrite_user_data(&self, user_id: UserId, new_data: UserData) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
-        path.push(format!("users/{:016X}", user_id));
+        path.push(format!("users/{}", user_id));
         Self::overwrite_old(path, &new_data.into_data()?) //FIXME: completely overwrites, even for small edits
     }
 
@@ -299,7 +296,7 @@ impl MessageBoard {
         Self::overwrite_old(path, &data);
     }
 
-    fn get_user_aead(&self, user_id: u64) -> Result<GuardedUserAeadKey<'_>, DataError> {
+    fn get_user_aead(&self, user_id: UserId) -> Result<GuardedUserAeadKey<'_>, DataError> {
         let user = self.get_user(user_id)?;
         Ok(GuardedUserAeadKey {
             board: self,
@@ -312,7 +309,7 @@ impl MessageBoard {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push("users");
         let new = fs::read_dir(&path).map_err(|_| internal_error!())?.map(|user_file| {
-            u64::from_str_radix(user_file.unwrap().file_name().to_str().unwrap(), 16).unwrap()
+            u64::from_str_radix(user_file.unwrap().file_name().to_str().unwrap(), 16).unwrap().into()
         }).collect();
         {
             *self.user_ids.write().unwrap() = new;
@@ -333,7 +330,7 @@ impl MessageBoard {
         Entry::from_data_iter(&mut self.get_entry_data_iter(entry_id)?)
     }
 
-    fn add_entry(&self, user_id: u64, entry_id: u64, entry: Entry) -> Result<(), DataError> {
+    fn add_entry(&self, user_id: UserId, entry_id: u64, entry: Entry) -> Result<(), DataError> {
         let mut parent = self.get_entry(entry.header_data.parent_id)?;
         parent.header_data.children_ids.push(entry_id);
         self.overwrite_entry(entry.header_data.parent_id, parent)?;
@@ -346,12 +343,12 @@ impl MessageBoard {
         Ok(())
     }
 
-    fn edit_entry(&self, user_id: u64, entry_id: u64, entry: Entry) -> Result<(), DataError> {
+    fn edit_entry(&self, user_id: UserId, entry_id: u64, entry: Entry) -> Result<(), DataError> {
         self.overwrite_entry(entry_id, entry)
     }
 
     /// checks if the user has read_perms to the *children* of the entry
-    fn has_read_perm(&self, user_id: u64, entry_id: u64) -> Result<bool, DataError> {
+    fn has_read_perm(&self, user_id: UserId, entry_id: u64) -> Result<bool, DataError> {
         let mut data_iter = self.get_entry_data_iter(entry_id)?;
         let (mut header, mut entry_type) = HeaderData::from_data_iter(&mut data_iter)?;
         let mut current_id = entry_id;
@@ -379,7 +376,7 @@ impl MessageBoard {
     }
 
     /// checks if the user has perms to the *children* of the entry
-    fn has_write_perm(&self, user_id: u64, entry_id: u64) -> Result<bool, DataError> {
+    fn has_write_perm(&self, user_id: UserId, entry_id: u64) -> Result<bool, DataError> {
         let mut data_iter = self.get_entry_data_iter(entry_id)?;
         let (mut header, mut entry_type) = HeaderData::from_data_iter(&mut data_iter)?;
         let mut current_id = entry_id;
@@ -406,10 +403,10 @@ impl MessageBoard {
         Ok(false)
     }
 
-    fn add_user(&self, crypto_rng: impl OldCryptoRng + OldRngCore, new_user_id: u64) -> Result<UserData, DataError> {
+    fn add_user(&self, crypto_rng: impl OldCryptoRng + OldRngCore, new_user_id: UserId) -> Result<UserData, DataError> {
         let key = UserAeadKey::new_random(crypto_rng);
         let mut path = PathBuf::from(self.file_dir.clone());
-        path.push(format!("users/{:016X}", new_user_id));
+        path.push(format!("users/{}", new_user_id));
         let data = UserData::new_empty(key);
         Self::write_new(&path, &data.into_data()?);
         Ok(data)
@@ -457,7 +454,7 @@ impl MessageBoard {
                     }
                     BoardRequest::AddUser => {
                         info!("Request Type: AddUser");
-                        let user_id = MessageBoard::generate_unique_id(rng, &board.user_ids.read().unwrap());
+                        let user_id = MessageBoard::generate_unique_id(rng, &board.user_ids.read().unwrap()).into();
                         let user = board.add_user(&mut crypto_rng, user_id)?;
                         Ok(BoardResponse::AddUser{user_id, user_aead: user.aead})
                     }
@@ -533,7 +530,7 @@ impl Server {
                     if client.read_exact(&mut request).is_err() {continue}; // should send some error
                     info!("Received {} byte message", request_size);
                     match BoardRequest::secure_from_data(kem_dk, |user_id| {
-                        board.get_user_aead(user_id).map_err(|e| {info!("Failed to retrieve User Aead for {:016X}: {:?}", user_id, e); e}).ok()
+                        board.get_user_aead(user_id).map_err(|e| {info!("Failed to retrieve User Aead for {}: {:?}", user_id, e); e}).ok()
                     },&request[8..]) {
                         Ok((re_encyption_data, request)) => {
                             incomind_queue_tx.send((*id, re_encyption_data, request)).expect("Queue Rx should be alive");
