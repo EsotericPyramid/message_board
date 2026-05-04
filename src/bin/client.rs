@@ -143,11 +143,11 @@ fn validate_config() {
 
 
 
-fn extract_name(entry_id: u64, entry: &Entry) -> String {
+fn extract_name(entry_id: EntryId, entry: &Entry) -> String {
     #[allow(unreachable_patterns)]
     match &entry.entry_data {
         EntryData::AccessGroup { name, write_perms: _, read_perms: _ } => name.clone(),
-        EntryData::Message { timestamp: _, message: _ } => format!("{:016X}", entry_id),
+        EntryData::Message { timestamp: _, message: _ } => entry_id.to_string(),
         _ => entry_id.to_string(),
     }
 }
@@ -155,7 +155,7 @@ fn extract_name(entry_id: u64, entry: &Entry) -> String {
 
 #[derive(Debug)]
 struct PathManager {
-    path: Vec<(u64, String)>
+    path: Vec<(EntryId, String)>
 }
 
 impl PathManager {
@@ -169,12 +169,12 @@ impl PathManager {
         self.path.len() > 0
     }
 
-    fn peek(&self) -> Option<&(u64, String)> {
+    fn peek(&self) -> Option<&(EntryId, String)> {
         if self.path.len() == 0 {return None}
         Some(&self.path[self.path.len() -1])
     }
 
-    fn pop(&mut self) -> Option<(u64, String)> {
+    fn pop(&mut self) -> Option<(EntryId, String)> {
         // do not remove the root
         if self.path.len() > 1 {
             self.path.pop()
@@ -183,12 +183,12 @@ impl PathManager {
         }
     }
 
-    fn push(&mut self, entry_id: u64, entry: &Entry) -> Result<(), DataError> {
+    fn push(&mut self, entry_id: EntryId, entry: &Entry) -> Result<(), DataError> {
         let HeaderData { version: _, parent_id, children_ids: _, author_id: _ } = &entry.header_data;
         if self.path.len() > 0 {
             if *parent_id != self.peek().unwrap().0 {return Err(DataError::NonChild)}
         } else {
-            if (*parent_id != ROOT_ID) | (entry_id != ROOT_ID) {return Err(DataError::MalformedRoot)}
+            if (**parent_id != ROOT_ENTRY_ID) | (*entry_id != ROOT_ENTRY_ID) {return Err(DataError::MalformedRoot)}
         }
 
         let name = extract_name(entry_id, entry);
@@ -223,11 +223,11 @@ impl Widget for &PathManager {
 
 
 #[derive(Debug)]
-struct Navigator(ScrollContainer<(u64, String)>);
+struct Navigator(ScrollContainer<(EntryId, String)>);
 
 impl Navigator {
-    fn replace_items(&mut self, items: &[u64]) {
-        self.0.replace_items(items.iter().copied().map(|x| (x, format!("{:016X}", x))).collect())
+    fn replace_items(&mut self, items: &[EntryId]) {
+        self.0.replace_items(items.iter().copied().map(|x| (x, x.to_string())).collect())
     }
 }
 
@@ -752,18 +752,18 @@ impl EntryTreeViewer {
             terminal,
         };
 
-        viewer.push_active_entry(ROOT_ID)?; // FIXME: scuff, really there is no "last" entry_id
+        viewer.push_active_entry(ROOT_ENTRY_ID.into())?; // FIXME: scuff, really there is no "last" entry_id
 
         Ok(viewer)
     }
 
-    fn swap_active_entry(&mut self, new_entry_id: u64) -> Result<(), DataError> {
+    fn swap_active_entry(&mut self, new_entry_id: EntryId) -> Result<(), DataError> {
         let mut board = self.board.borrow_mut();
         let new_entry = board.get_entry(new_entry_id)?;
         self.navigator.replace_items(&new_entry.header_data.children_ids); // temporary
         let old_entry_id = self.path.peek().map(|x| x.0); //jank
         self.path.pop();
-        if (self.path.len() > 2) | (new_entry_id != ROOT_ID) {
+        if (self.path.len() > 2) | (*new_entry_id != ROOT_ENTRY_ID) {
             self.path.push(new_entry_id, &new_entry)?;
         }
         if let (Some(old_entry), Some(old_entry_id)) = (self.viewer.add_entry(new_entry), old_entry_id) {
@@ -772,7 +772,7 @@ impl EntryTreeViewer {
         Ok(())
     }
 
-    fn push_active_entry(&mut self, new_entry_id: u64) -> Result<(), DataError> {
+    fn push_active_entry(&mut self, new_entry_id: EntryId) -> Result<(), DataError> {
         let mut board = self.board.borrow_mut();
         let new_entry = board.get_entry(new_entry_id)?;
         self.navigator.replace_items(&new_entry.header_data.children_ids); // temporary

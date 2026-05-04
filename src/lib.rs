@@ -12,7 +12,6 @@ use rand_chacha::rand_core::RngCore as OldRngCore;
 use rand_chacha::rand_core::CryptoRng as OldCryptoRng; 
 
 pub const PORT: u16 = 8000;
-pub const ROOT_ID: u64 = 0x00_00_00_00_00_00_00_00;
 pub const ENTRY_MAGIC_NUMBER: u16 = 0x1234;
 pub const USER_MAGIC_NUMBER: u16 = 0x1470;
 
@@ -25,6 +24,8 @@ pub const RESERVED_USER_IDS: [u64; 3] = [
     ADMIN_USER_ID,
     ANONYMOUS_USER_ID,
 ];
+
+pub const ROOT_ENTRY_ID: u64 = 0;
 
 /// file versions
 pub const ENTRY_FILE_VERSION: u8 = 0x00;
@@ -58,46 +59,52 @@ pub const INHERIT_BASE: u8 = 0x00;
 pub const WHITE_BASE: u8 = 0x01;
 pub const BLACK_BASE: u8 = 0x02;
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
-pub struct UserId(u64);
+macro_rules! u64_id {
+    ($struct:ident) => {
+        #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+        pub struct $struct(u64);
 
-impl From<u64> for UserId {
-    fn from(value: u64) -> Self {Self(value)}
+        impl From<u64> for $struct {
+            fn from(value: u64) -> Self {Self(value)}
+        }
+
+        impl From<$struct> for u64 {
+            fn from(value: $struct) -> Self {value.0}
+        }
+
+        impl Deref for $struct {
+            type Target = u64;
+        
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+
+        impl DerefMut for $struct {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.0
+            }
+        }
+
+        impl AsRef<u64> for $struct {
+            fn as_ref(&self) -> &u64 {&self.0}
+        }
+
+        impl AsMut<u64> for $struct {
+            fn as_mut(&mut self) -> &mut u64 {&mut self.0}
+        }
+
+        impl Borrow<u64> for $struct {
+            fn borrow(&self) -> &u64 {&self.0}
+        }
+
+        impl BorrowMut<u64> for $struct {
+            fn borrow_mut(&mut self) -> &mut u64 {&mut self.0}
+        }
+    };
 }
 
-impl From<UserId> for u64 {
-    fn from(value: UserId) -> Self {value.0}
-}
-
-impl Deref for UserId {
-    type Target = u64;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for UserId {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl AsRef<u64> for UserId {
-    fn as_ref(&self) -> &u64 {&self.0}
-}
-
-impl AsMut<u64> for UserId {
-    fn as_mut(&mut self) -> &mut u64 {&mut self.0}
-}
-
-impl Borrow<u64> for UserId {
-    fn borrow(&self) -> &u64 {&self.0}
-}
-
-impl BorrowMut<u64> for UserId {
-    fn borrow_mut(&mut self) -> &mut u64 {&mut self.0}
-}
+u64_id!(UserId);
 
 impl Display for UserId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -105,6 +112,17 @@ impl Display for UserId {
             SERVER_USER_ID => "Server",
             ADMIN_USER_ID => "Admin",
             ANONYMOUS_USER_ID => "Anon",
+            _ => return write!(f, "{:016X}", self.0)
+        })
+    }
+}
+
+u64_id!(EntryId);
+
+impl Display for EntryId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", match self.0 {
+            ROOT_ENTRY_ID => "Root",
             _ => return write!(f, "{:016X}", self.0)
         })
     }
@@ -294,8 +312,8 @@ impl AsData for Entry {
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct HeaderData {
     pub version: u8,
-    pub parent_id: u64,
-    pub children_ids: Vec<u64>,
+    pub parent_id: EntryId,
+    pub children_ids: Vec<EntryId>,
     pub author_id: UserId,
 }
 
@@ -316,11 +334,11 @@ impl HeaderData {
 
         let entry_type = read_u8(data_iter)?;
 
-        let parent_id = read_u64(data_iter)?;
+        let parent_id = read_u64(data_iter)?.into();
         let num_children = read_u16(data_iter)?;
         let mut children_ids = Vec::new();
         for _ in 0..num_children {
-            children_ids.push(read_u64(data_iter)?);
+            children_ids.push(read_u64(data_iter)?.into());
         }
 
         let author_id = read_u64(data_iter)?.into();
@@ -598,7 +616,7 @@ impl EntryVariant {
 #[derive(PartialEq, Eq, Debug)]
 pub struct UserData {
     pub aead: UserAeadKey,
-    pub entry_ids: Vec<u64>,
+    pub entry_ids: Vec<EntryId>,
 }
 
 impl UserData {
@@ -630,7 +648,7 @@ impl AsData for UserData {
         let num_entries = read_u32(data_iter)? as usize;
         let mut entry_ids = Vec::with_capacity(num_entries);
         for _ in 0..num_entries {
-            entry_ids.push(read_u64(data_iter)?);
+            entry_ids.push(read_u64(data_iter)?.into());
         }
         Ok(UserData { 
             aead,
@@ -732,9 +750,9 @@ pub enum ReEncryptionData {
 ///     - no data -
 #[derive(PartialEq, Eq, Debug)]
 pub enum BoardRequest {
-    GetEntry { user_id: UserId, entry_id: u64 },
+    GetEntry { user_id: UserId, entry_id: EntryId },
     AddEntry { user_id: UserId, entry: Entry },
-    EditEntry { user_id: UserId, entry_id: u64, entry: Entry },
+    EditEntry { user_id: UserId, entry_id: EntryId, entry: Entry },
     GetUser { user_id: UserId },
     AddUser,
     GetKemEk,
@@ -778,7 +796,7 @@ impl AsData for BoardRequest {
             // entry requests
             GET_ENTRY => { // GetEntry
                 let user_id = read_u64(data_iter)?.into();
-                let entry_id = read_u64(data_iter)?;
+                let entry_id = read_u64(data_iter)?.into();
                 BoardRequest::GetEntry { user_id, entry_id }
             }
             ADD_ENTRY => { // AddEntry
@@ -788,7 +806,7 @@ impl AsData for BoardRequest {
             }
             EDIT_ENTRY => {
                 let user_id = read_u64(data_iter)?.into();
-                let entry_id = read_u64(data_iter)?;
+                let entry_id = read_u64(data_iter)?.into();
                 let entry = Entry::from_data_iter(data_iter)?;
                 BoardRequest::EditEntry { user_id, entry_id, entry }
             }
@@ -938,7 +956,7 @@ impl BoardRequest {
         Ok((re_encryptor, match discriminant {
             // entry requests
             GET_ENTRY => { // GetEntry
-                let entry_id = read_u64(&mut body)?;
+                let entry_id = read_u64(&mut body)?.into();
                 BoardRequest::GetEntry { user_id: user_id.unwrap(), entry_id }
             }
             ADD_ENTRY => { // AddEntry
@@ -946,7 +964,7 @@ impl BoardRequest {
                 BoardRequest::AddEntry { user_id: user_id.unwrap(), entry }
             }
             EDIT_ENTRY => {
-                let entry_id = read_u64(&mut body)?;
+                let entry_id = read_u64(&mut body)?.into();
                 let entry = Entry::from_data_iter(&mut body)?;
                 BoardRequest::EditEntry { user_id: user_id.unwrap(), entry_id, entry }
             }
@@ -975,7 +993,7 @@ impl BoardRequest {
 #[derive(PartialEq, Debug)]
 pub enum BoardResponse {
     GetEntry(Entry),
-    AddEntry(u64),
+    AddEntry(EntryId),
     EditEntry,
 
     GetUser(UserData),
@@ -1064,7 +1082,7 @@ impl AsData for BoardResponse {
                 BoardResponse::GetEntry(entry)
             }
             ADD_ENTRY => { // AddEntry
-                let entry_id = read_u64(data_iter)?;
+                let entry_id = read_u64(data_iter)?.into();
                 BoardResponse::AddEntry(entry_id)
             }
             EDIT_ENTRY => BoardResponse::EditEntry,
@@ -1230,7 +1248,7 @@ impl BoardResponse {
                 BoardResponse::GetEntry(entry)
             }
             ADD_ENTRY => { // AddEntry
-                let entry_id = read_u64(&mut body)?;
+                let entry_id = read_u64(&mut body)?.into();
                 BoardResponse::AddEntry(entry_id)
             }
             EDIT_ENTRY => BoardResponse::EditEntry,

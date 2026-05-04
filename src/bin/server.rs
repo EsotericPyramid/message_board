@@ -20,7 +20,7 @@ use rand_chacha::rand_core::CryptoRng as OldCryptoRng;
 /// extended off of the user home
 const RC_FILE: &str = ".config/message_board/server_rc.toml";
 
-const ROOT_ENTRY_ID: u64 = 0;
+
 
 
 const SERVER_MAINLOOP_PERIOD: Duration = Duration::new(0, 1000000); // ie. 1 ms
@@ -89,7 +89,7 @@ impl<'a> Drop for GuardedUserAeadKey<'a> {
 struct MessageBoard {
     address: String,
     file_dir: Box<Path>,
-    entry_ids: RwLock<HashSet<u64>>,
+    entry_ids: RwLock<HashSet<EntryId>>,
     user_ids: RwLock<HashSet<UserId>>,
 }
 
@@ -194,10 +194,10 @@ impl MessageBoard {
                 board.write_storage_file(storage);
 
                 let default_root = Entry {
-                    header_data: HeaderData { version: ENTRY_FILE_VERSION, parent_id: ROOT_ENTRY_ID, children_ids: Vec::new(), author_id: SERVER_USER_ID.into() },
+                    header_data: HeaderData { version: ENTRY_FILE_VERSION, parent_id: ROOT_ENTRY_ID.into(), children_ids: Vec::new(), author_id: SERVER_USER_ID.into() },
                     entry_data: EntryData::AccessGroup { name: String::from("Root"), write_perms: DefaultedIdSet::White { blacklist_ids: Vec::new() }, read_perms: DefaultedIdSet::White { blacklist_ids: Vec::new() }}
                 };
-                if board.write_entry(ROOT_ENTRY_ID, default_root).is_err_and(|e| if let DataError::AlreadyExists = e {false} else {true}) {
+                if board.write_entry(ROOT_ENTRY_ID.into(), default_root).is_err_and(|e| if let DataError::AlreadyExists = e {false} else {true}) {
                     error!("failed to create root entry");
                 }
             } else {
@@ -237,9 +237,9 @@ impl MessageBoard {
     /// use is generally prefered over `get_entry_data`
     /// 
     /// may or may not be implemented in terms of `get_entry_data`
-    fn get_entry_data_iter(&self, entry_id: u64) -> Result<impl Iterator<Item = u8>, DataError> {
+    fn get_entry_data_iter(&self, entry_id: EntryId) -> Result<impl Iterator<Item = u8>, DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
-        path.push(format!("entries/{:016X}", entry_id));
+        path.push(format!("entries/{:016X}", *entry_id));
         let entry = std::fs::File::open(path).map_err(|_| DataError::DoesNotExist)?;
         Ok(BufReader::new(entry).bytes().filter_map(|x| x.ok())) // Scuff
     }
@@ -254,18 +254,18 @@ impl MessageBoard {
     /// encapsulation method to write an `Entry` at `entry_id`
     /// 
     /// requires that the entry_id doesn't currently exist
-    fn write_entry(&self, entry_id: u64, entry: Entry) -> Result<(), DataError> {
+    fn write_entry(&self, entry_id: EntryId, entry: Entry) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
-        path.push(format!("entries/{:016X}", entry_id));
+        path.push(format!("entries/{:016X}", *entry_id));
         Self::write_new(path, &entry.into_data()?)
     }
 
     /// encapsulation method to overwrite / edit an `Entry` at `entry_id`
     /// 
     /// requires that the entry_id currently exists
-    fn overwrite_entry(&self, entry_id: u64, new_entry: Entry) -> Result<(), DataError> {
+    fn overwrite_entry(&self, entry_id: EntryId, new_entry: Entry) -> Result<(), DataError> {
         let mut path = PathBuf::from(self.file_dir.clone());
-        path.push(format!("entries/{:016X}", entry_id));
+        path.push(format!("entries/{:016X}", *entry_id));
         Self::overwrite_old(path, &new_entry.into_data()?)
     }
 
@@ -321,16 +321,16 @@ impl MessageBoard {
         let mut path = PathBuf::from(self.file_dir.clone());
         path.push("entries");
         *self.entry_ids.write().unwrap() = fs::read_dir(&path).map_err(|_| internal_error!())?.map(|entry_file| {
-            u64::from_str_radix(entry_file.unwrap().file_name().to_str().unwrap(), 16).unwrap()
+            u64::from_str_radix(entry_file.unwrap().file_name().to_str().unwrap(), 16).unwrap().into()
         }).collect();
         Ok(())
     }
 
-    fn get_entry(&self, entry_id: u64) -> Result<Entry, DataError> {
+    fn get_entry(&self, entry_id: EntryId) -> Result<Entry, DataError> {
         Entry::from_data_iter(&mut self.get_entry_data_iter(entry_id)?)
     }
 
-    fn add_entry(&self, user_id: UserId, entry_id: u64, entry: Entry) -> Result<(), DataError> {
+    fn add_entry(&self, user_id: UserId, entry_id: EntryId, entry: Entry) -> Result<(), DataError> {
         let mut parent = self.get_entry(entry.header_data.parent_id)?;
         parent.header_data.children_ids.push(entry_id);
         self.overwrite_entry(entry.header_data.parent_id, parent)?;
@@ -343,12 +343,12 @@ impl MessageBoard {
         Ok(())
     }
 
-    fn edit_entry(&self, user_id: UserId, entry_id: u64, entry: Entry) -> Result<(), DataError> {
+    fn edit_entry(&self, user_id: UserId, entry_id: EntryId, entry: Entry) -> Result<(), DataError> {
         self.overwrite_entry(entry_id, entry)
     }
 
     /// checks if the user has read_perms to the *children* of the entry
-    fn has_read_perm(&self, user_id: UserId, entry_id: u64) -> Result<bool, DataError> {
+    fn has_read_perm(&self, user_id: UserId, entry_id: EntryId) -> Result<bool, DataError> {
         let mut data_iter = self.get_entry_data_iter(entry_id)?;
         let (mut header, mut entry_type) = HeaderData::from_data_iter(&mut data_iter)?;
         let mut current_id = entry_id;
@@ -364,7 +364,7 @@ impl MessageBoard {
                     return Ok(has_perm);
                 }
             }
-            if current_id == ROOT_ID {
+            if *current_id == ROOT_ENTRY_ID {
                 break;
             }
             current_id = header.parent_id;
@@ -376,7 +376,7 @@ impl MessageBoard {
     }
 
     /// checks if the user has perms to the *children* of the entry
-    fn has_write_perm(&self, user_id: UserId, entry_id: u64) -> Result<bool, DataError> {
+    fn has_write_perm(&self, user_id: UserId, entry_id: EntryId) -> Result<bool, DataError> {
         let mut data_iter = self.get_entry_data_iter(entry_id)?;
         let (mut header, mut entry_type) = HeaderData::from_data_iter(&mut data_iter)?;
         let mut current_id = entry_id;
@@ -392,7 +392,7 @@ impl MessageBoard {
                     return Ok(has_perm);
                 }
             }
-            if current_id == ROOT_ID {
+            if *current_id == ROOT_ENTRY_ID {
                 break;
             }
             current_id = header.parent_id;

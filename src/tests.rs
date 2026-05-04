@@ -67,7 +67,7 @@ fn rand_defaulted_id_set(mut rng: impl Rng, _char_rng: impl Iterator<Item = char
 fn rand_entry(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>) -> Entry {
     let mut children_ids = Vec::new();
     for _ in 0..rng.random_range(1..100) {
-        children_ids.push(rng.next_u64());
+        children_ids.push(rng.next_u64().into());
     }
 
     let entry_data = match rng.random_range(0..2) {
@@ -91,7 +91,7 @@ fn rand_entry(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>) -> En
         entry_data,
         header_data: HeaderData { 
             version: ENTRY_FILE_VERSION, 
-            parent_id: rng.next_u64(), 
+            parent_id: rng.next_u64().into(), 
             children_ids, 
             author_id: rng.next_u64().into(),
         },
@@ -103,7 +103,7 @@ fn rand_entry(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>) -> En
 fn rand_user(mut rng: impl Rng, crypto_rng: impl OldCryptoRng + OldRngCore) -> UserData {
     let mut entry_ids = Vec::new();
     for _ in 0..rng.random_range(1..100) {
-        entry_ids.push(rng.next_u64());
+        entry_ids.push(rng.next_u64().into());
     }
     let aead = UserAeadKey::new_random(crypto_rng);
     let user = UserData { 
@@ -117,7 +117,7 @@ fn rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>) -> 
     match rng.random_range(0..5) {
         0 => {
             let user_id = rng.next_u64().into();
-            let entry_id = rng.next_u64();
+            let entry_id = rng.next_u64().into();
             BoardRequest::GetEntry { user_id, entry_id }
         }
         1 => {
@@ -127,7 +127,7 @@ fn rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>) -> 
         }
         2 => {
             let user_id = rng.next_u64().into();
-            let entry_id = rng.next_u64();
+            let entry_id = rng.next_u64().into();
             let entry = rand_entry(&mut rng, &mut char_rng);
             BoardRequest::EditEntry { user_id, entry_id, entry }
         }
@@ -145,7 +145,7 @@ fn rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>) -> 
 fn new_rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>, sender_user_id: UserId) -> BoardRequest {
     match rng.random_range(0..5) {
         0 => {
-            let entry_id = rng.next_u64();
+            let entry_id = rng.next_u64().into();
             BoardRequest::GetEntry { user_id: sender_user_id, entry_id }
         }
         1 => {
@@ -153,7 +153,7 @@ fn new_rand_request(mut rng: impl Rng, mut char_rng: impl Iterator<Item = char>,
             BoardRequest::AddEntry { user_id: sender_user_id, entry }
         }
         2 => {
-            let entry_id = rng.next_u64();
+            let entry_id = rng.next_u64().into();
             let entry = rand_entry(&mut rng, &mut char_rng);
             BoardRequest::EditEntry { user_id: sender_user_id, entry_id, entry }
         }
@@ -174,7 +174,7 @@ fn rand_response(mut rng: impl Rng, char_rng: impl Iterator<Item = char>, crypto
             BoardResponse::GetEntry(rand_entry(rng, char_rng))
         }
         1 => {
-            BoardResponse::AddEntry(rng.next_u64())
+            BoardResponse::AddEntry(rng.next_u64().into())
         }
         2 => {
             BoardResponse::EditEntry

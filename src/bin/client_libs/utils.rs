@@ -147,21 +147,21 @@ impl MessageBoardConnection {
         BoardResponse::secure_from_data(&buffer, &mut self.keys)
     }
 
-    pub fn get_entry(&mut self, entry_id: u64) -> Result<Entry, DataError> {
+    pub fn get_entry(&mut self, entry_id: EntryId) -> Result<Entry, DataError> {
         let request = BoardRequest::GetEntry { user_id: self.user_id.unwrap(), entry_id };
         let response = self.send_request(request)?;
         let BoardResponse::GetEntry(entry) = response else {return Err(internal_error!())};
         Ok(entry)
     }
 
-    pub fn write_entry(&mut self, entry: Entry) -> Result<u64, DataError> {
+    pub fn write_entry(&mut self, entry: Entry) -> Result<EntryId, DataError> {
         let request = BoardRequest::AddEntry { user_id: self.user_id.unwrap(), entry };
         let response = self.send_request(request)?;
         let BoardResponse::AddEntry(entry_id) = response else {return Err(internal_error!())};
         Ok(entry_id)
     }
 
-    pub fn edit_entry(&mut self, entry_id: u64, entry: Entry) -> Result<(), DataError> {
+    pub fn edit_entry(&mut self, entry_id: EntryId, entry: Entry) -> Result<(), DataError> {
         let request = BoardRequest::EditEntry { user_id: self.user_id.unwrap(), entry_id, entry };
         let response = self.send_request(request)?;
         let BoardResponse::EditEntry = response else {return Err(internal_error!())};
