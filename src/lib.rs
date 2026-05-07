@@ -318,6 +318,10 @@ pub struct HeaderData {
 }
 
 impl HeaderData {
+    pub fn new(parent_id: EntryId, children_ids: Vec<EntryId>, author_id: UserId) -> Self {
+        Self { version: ENTRY_FILE_VERSION, parent_id, children_ids, author_id }
+    }
+
     /// gives a HeaderData and the entry type
     pub fn from_data(data: &[u8]) -> Result<(Self, u8), DataError> {
         let mut data_iter = data.iter().copied();
@@ -368,7 +372,7 @@ impl HeaderData {
     }
 }
 
-#[derive(PartialEq, Eq, Debug, Clone)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum DefaultBase {
     Inherit,
     White,
@@ -390,6 +394,14 @@ impl DefaultBase {
             WHITE_BASE => Ok(Self::White),
             BLACK_BASE => Ok(Self::Black),
             _ => Err(DataError::InvalidDiscriminant)
+        }
+    }
+
+    pub fn as_string(&self) -> &'static str {
+        match self {
+            DefaultBase::Inherit => "Inherit",
+            DefaultBase::White => "White",
+            DefaultBase::Black => "Black",
         }
     }
 }
@@ -430,6 +442,14 @@ pub enum DefaultedIdSet {
 }
 
 impl DefaultedIdSet {
+    pub fn empty_from_base(base: DefaultBase) -> Self {
+        match base {
+            DefaultBase::Inherit => DefaultedIdSet::Inherit { whitelist_ids: Vec::new(), blacklist_ids: Vec::new()},
+            DefaultBase::White => DefaultedIdSet::White { blacklist_ids: Vec::new() },
+            DefaultBase::Black => DefaultedIdSet::Black { whitelist_ids: Vec::new() }
+        }
+    }
+
     pub fn contains(&self, id: UserId) -> Option<bool> {
         match self {
             Self::Inherit { whitelist_ids, blacklist_ids } => {

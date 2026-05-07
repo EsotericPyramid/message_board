@@ -23,6 +23,12 @@ const ENTRY_VARIANTS: [EntryVariant; 2] = [
     EntryVariant::AccessGroup,
 ];
 
+const DEFAULT_BASES: [DefaultBase; 3] = [
+    DefaultBase::Inherit,
+    DefaultBase::Black,
+    DefaultBase::White,
+];
+
     
 const RC_FILE: &str = ".config/message_board/client_rc.toml";
     
@@ -316,6 +322,69 @@ impl InputWidget for EntryVariantSelector {
     fn consume_child(&mut self, child: ClientState) -> Option<StateChange> {
         if let ClientState::Error(_) = child {} else {
             eprintln!("unexpected child of EntryVariantSelector")
+        }
+        None
+    }
+}
+
+#[derive(Debug)]
+struct DefaultBaseSelector{
+    selector: ScrollContainer<DefaultBase>,
+    title: &'static str,
+    was_selected: bool,
+}
+
+impl DefaultBaseSelector {
+    fn new(title: &'static str) -> Self {
+        Self{
+            selector: ScrollContainer::new(Vec::from(DEFAULT_BASES)),
+            title,
+            was_selected: false,
+        }
+    }
+
+    fn selection(&self) -> Option<(usize, &DefaultBase)> {
+        if self.was_selected {
+            self.selector.selection()
+        } else {
+            None
+        }
+    }
+
+    fn hovered(&self) -> Option<(usize, &DefaultBase)> {
+        self.selector.selection()
+    }
+}
+
+impl InputWidget for DefaultBaseSelector {
+    fn render(&self, area: Rect, buf: &mut Buffer) -> Rect {
+        self.selector.base_render(area, buf, &*self.title, |x| String::from((*x).as_string()))
+    }
+
+    fn handle_event(&mut self, event: Event) -> Option<StateChange> {
+        if let Some(event) = self.selector.base_handle_event(event.clone()) {
+            return Some(event)
+        } else {
+            if let Event::Key(key_event) = event {
+                if !key_event.is_press() {return None}
+                match key_event.code {
+                    KeyCode::Enter => {
+                        self.was_selected = true;
+                        return Some(StateChange::Pop)
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+    }
+
+    fn focus(&mut self) {self.selector.focus();}
+    fn unfocus(&mut self) {self.selector.unfocus();}
+
+    fn consume_child(&mut self, child: ClientState) -> Option<StateChange> {
+        if let ClientState::Error(_) = child {} else {
+            eprintln!("unexpected child of DefaultBaseSelector")
         }
         None
     }
@@ -923,12 +992,11 @@ impl InputWidget for EntryTreeViewer {
                 let mut matched = true;
                 match child {
                     ClientState::WriteVarientSelection(selector) => {
-                        let header = HeaderData { 
-                            version: ENTRY_FILE_VERSION, 
-                            parent_id: self.path.peek().unwrap().0, 
-                            children_ids: Vec::new(), 
-                            author_id: self.board.borrow().get_user_id().unwrap(), 
-                        };
+                        let header = HeaderData::new(
+                            self.path.peek().unwrap().0, 
+                            Vec::new(), 
+                            self.board.borrow().get_user_id().unwrap(), 
+                        );
                         let entry = match selector.selection().map(|x| x.1) {
                             Some(EntryVariant::Message) => {
                                 // boot up vim for the text editor
@@ -956,14 +1024,7 @@ impl InputWidget for EntryTreeViewer {
                                 })
                             }
                             Some(EntryVariant::AccessGroup) => {
-                                Some(Entry {
-                                    header_data: header,
-                                    entry_data: EntryData::AccessGroup { 
-                                        name: String::from("test"), 
-                                        write_perms: DefaultedIdSet::Inherit { whitelist_ids: Vec::new(), blacklist_ids: Vec::new() }, 
-                                        read_perms: DefaultedIdSet::Inherit { whitelist_ids: Vec::new(), blacklist_ids: Vec::new() },
-                                    }
-                                })
+                                return Some(StateChange::Push(ClientState::AccessGroupBuilder(AccessGroupBuilder::new())));
                             }
                             None => None
                         };
@@ -972,6 +1033,26 @@ impl InputWidget for EntryTreeViewer {
                             if let Err(e) = result {
                                 return Some(StateChange::Push(ClientState::Error(vec![e])));
                             }
+                        }
+                    }
+                    ClientState::AccessGroupBuilder(builder) => {
+                        if !builder.was_completed {return Some(StateChange::Blank)}
+                        let access_group = EntryData::AccessGroup { 
+                            name: builder.title.text.iter().copied().collect(), 
+                            write_perms: DefaultedIdSet::empty_from_base(*builder.write_base_selector.hovered().unwrap().1), 
+                            read_perms: DefaultedIdSet::empty_from_base(*builder.read_base_selector.hovered().unwrap().1),
+                        };
+                        let entry = Entry {
+                            header_data: HeaderData::new(
+                                self.path.peek().unwrap().0, 
+                                Vec::new(), 
+                                self.board.borrow().get_user_id().unwrap(),
+                            ), 
+                            entry_data: access_group
+                        };
+                        let result = self.board.borrow_mut().write_entry(entry);
+                        if let Err(e) = result {
+                            return Some(StateChange::Push(ClientState::Error(vec![e])));
                         }
                     }
                     ClientState::Error(_) => {}
@@ -998,6 +1079,129 @@ impl InputWidget for AccessGroupIdList {
     fn focus(&mut self) {self.id_list.focus();}
     fn unfocus(&mut self) {self.id_list.unfocus();}
     fn consume_child(&mut self, child: ClientState) -> Option<StateChange> {self.id_list.consume_child(child)}
+}
+
+#[derive(Debug)]
+struct AccessGroupBuilder {
+    state: usize,
+    title: TextEntry,
+    write_base_selector: DefaultBaseSelector,
+    read_base_selector: DefaultBaseSelector,
+    was_completed: bool,
+    is_focused: bool,
+}
+
+impl AccessGroupBuilder {
+    fn new() -> Self {
+        Self { 
+            state: 0,
+            title: TextEntry::new_unsized(),
+            write_base_selector: DefaultBaseSelector::new(" Write Default Base "),
+            read_base_selector: DefaultBaseSelector::new(" Read Default Base "),
+            was_completed: false,
+            is_focused: false
+        }
+    }
+
+    fn reload_focus(&mut self) {
+        self.title.unfocus();
+        self.write_base_selector.unfocus();
+        self.read_base_selector.unfocus();
+        if self.is_focused {
+            match self.state {
+                0 => self.title.focus(),
+                1 => self.write_base_selector.focus(),
+                2 => self.read_base_selector.focus(),
+                _ => eprintln!("Invalid AccessGroupBuilder state val")
+            }
+        }
+    }
+}
+
+impl InputWidget for AccessGroupBuilder {
+    fn render(&self, area: Rect, buf: &mut Buffer) -> Rect {
+        let block = Block::bordered();
+        let mut title = String::from(" Access Group Builder (");
+        title.push_str(&(self.state + 1).to_string());
+        title.push_str(" / 2) ");
+        let mut inner_area = block.inner(area);
+        Clear.render(inner_area, buf);
+        match self.state {
+            0 => {
+                inner_area = Layout::vertical([
+                    Constraint::Fill(1),
+                    Constraint::Length(3),
+                    Constraint::Fill(1),
+                ]).split(area)[1];
+                inner_area = Layout::horizontal([
+                    Constraint::Fill(1),
+                    Constraint::Length(std::cmp::max(self.title.get_ideal_width(), 16) + 2),
+                    Constraint::Fill(1),
+                ]).split(inner_area)[1];
+                let text_entry_block = Block::bordered().title(" Enter Title ");
+                text_entry_block.clone().render(inner_area, buf);
+                inner_area = text_entry_block.inner(inner_area);
+                self.title.render(inner_area, buf);
+            }
+            1 | 2 => {
+                let areas = Layout::horizontal([
+                    Constraint::Fill(1),
+                    Constraint::Fill(1),
+                ]).split(inner_area);
+                self.write_base_selector.render(areas[0], buf);
+                self.read_base_selector.render(areas[1], buf);
+            }
+            _ => eprintln!("Invalid AccessGroupBuilder state val")
+        }
+        block.title(title).render(area, buf);
+        inner_area
+    }
+
+    fn handle_event(&mut self, event: Event) -> Option<StateChange> {
+        let internal_state_change = match self.state {
+            0 => self.title.handle_event(event),
+            1 => self.write_base_selector.handle_event(event),
+            2 => self.read_base_selector.handle_event(event),
+            _ => Some(StateChange::Push(ClientState::Error(vec![internal_error!()]))),
+        };
+        let true_state_change = match internal_state_change {
+            Some(StateChange::MoveRight | StateChange::Pop) => {
+                self.state += 1;
+                if self.state >= 3 {
+                    if 
+                        self.write_base_selector.selection().map(|x| x.1).is_some() & 
+                        self.read_base_selector.selection().map(|x| x.1).is_some() 
+                    {
+                        self.was_completed = true;
+                        return Some(StateChange::Pop)
+                    } else {
+                        return Some(StateChange::Push(ClientState::Error(vec![internal_error!()])))
+                    }
+                }
+                self.reload_focus();
+                Some(StateChange::Blank)
+            }
+            Some(StateChange::MoveLeft) => {
+                if self.state > 0 {
+                    self.state -= 1;
+                }
+                self.reload_focus();
+                Some(StateChange::Blank)
+            }
+            x => x
+        };
+        true_state_change
+    }
+    
+    fn focus(&mut self) {self.is_focused = true; self.reload_focus();}
+    fn unfocus(&mut self) {self.is_focused = false; self.reload_focus();}
+
+    fn consume_child(&mut self, child: ClientState) -> Option<StateChange> {
+        if let ClientState::Error(_) = child {} else {
+            eprintln!("unexpected child of AccessGroupBuilder")
+        }
+        None
+    }
 }
 
 
@@ -1030,38 +1234,48 @@ impl Client {
     }
 
     fn handle_state_change(&mut self, change: Option<StateChange>) {
-        //eprintln!("{:?}", change);
         if let Some(change) = change {
-            match change {
+            let new_state_change = match change {
                 StateChange::Push(mut new_state) => {
                     if self.state.len() > 0 {
                         let state_end = self.state.len() -1;
                         self.state[state_end].unfocus();
                     }
                     new_state.focus();
+                    eprintln!("state pushed: {}", new_state.to_string());
                     self.state.push(new_state);
+                    None
                 }
                 StateChange::Pop => {
                     let mut child_state = self.state.pop().expect("Shouldn't pop off a state when there are no states");
+                    eprintln!("state popped: {}", child_state.to_string());
                     child_state.unfocus(); // debatable
                     if self.state.len() > 0 {
                         let state_end = self.state.len() -1; // aside: lifetimes are cool but sometimes they are just feel dumb :(
-                        self.state[state_end].consume_child(child_state);
+                        let new_state_change = self.state[state_end].consume_child(child_state);
                         self.state[state_end].focus();
+                        new_state_change
+                    } else {
+                        None
                     }
                 }
                 StateChange::Swap(new_state) => {
                     // NOTE: can't swap this out for the `handle_state_change` to avoid termination if only 1 state on the stack
                     let child_state = self.state.pop().expect("Shouldn't pop off a state when there are no states");
+                    println!("state swapped out: {}", child_state.to_string());
+                    let mut new_state_change = None;
                     if self.state.len() > 0 {
                         let state_end = self.state.len() -1; // aside: lifetimes are cool but sometimes they are just feel dumb :(
-                        self.state[state_end].consume_child(child_state);
+                        new_state_change = self.state[state_end].consume_child(child_state);
                         self.state[state_end].focus();
                     }
+                    eprintln!("state swapped in: {}", new_state.to_string());
                     self.handle_state_change(Some(StateChange::Push(new_state)));
+                    new_state_change
                 }
-                _ => {}
-            }
+                _ => None
+            };
+            self.handle_state_change(new_state_change); //note: potential infinite recursion bug here
         }
         if self.state.len() == 0 {self.exit = true; return}
     }
@@ -1119,8 +1333,9 @@ impl Widget for &Client {
         }
         let whole_area = area;
         let mut area = layout[1];
+        eprintln!("render start");
         for sub_state in &self.state {
-            //eprintln!("{:?}", sub_state);≈
+            eprintln!("\tsub_state: {}", sub_state.to_string());
             if let ClientState::Error(..) = sub_state {
                 sub_state.render(whole_area, buf);
             } else {

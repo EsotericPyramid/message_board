@@ -178,36 +178,57 @@ impl<T> ScrollContainer<T> {
 pub struct TextEntry {
     pub text: Vec<char>,
     cursor_pos: usize,
-    max_size: usize,
+    max_size: Option<usize>,
 }
 
 impl TextEntry {
     pub fn new(size: usize) -> Self {
-        Self { text: Vec::new(), cursor_pos: 0, max_size: size }
+        Self { text: Vec::new(), cursor_pos: 0, max_size: Some(size) }
+    }
+
+    pub fn new_unsized() -> Self {
+        Self { text: Vec::new(), cursor_pos: 0, max_size: None }
+    }
+
+    pub fn get_ideal_width(&self) -> u16 {
+        let mut out = self.text.len() + 1;
+        if self.max_size.map_or(false, |max_size| out > max_size) {
+            out = self.max_size.unwrap();
+        }
+        out as u16
     }
 }
 
 impl InputWidget for TextEntry {
-    fn render(&self, area: Rect, buf: &mut Buffer) -> Rect {
+    fn render(&self, mut area: Rect, buf: &mut Buffer) -> Rect {
         let mut line = Line::default();
-        line.push_span(self.text[..self.cursor_pos].iter().collect::<String>());
-        if self.cursor_pos < self.max_size {
-            if self.cursor_pos < self.text.len() {
-                line.push_span(self.text[self.cursor_pos].reversed());
-                if self.cursor_pos + 1 < self.text.len() {
-                    line.push_span(self.text[self.cursor_pos + 1..].iter().collect::<String>());
+            line.push_span(self.text[..self.cursor_pos].iter().collect::<String>());
+            if self.max_size.map_or(true, |max_size| self.cursor_pos < max_size) {
+                if self.cursor_pos < self.text.len() {
+                    line.push_span(self.text[self.cursor_pos].reversed());
+                    if self.cursor_pos + 1 < self.text.len() {
+                        line.push_span(self.text[self.cursor_pos + 1..std::cmp::min(self.text.len() -1, area.width as usize)].iter().collect::<String>());
+                    }
+                } else {
+                    line.push_span(' '.reversed());
                 }
-            } else {
-                line.push_span(' '.reversed());
             }
-        }
         Clear.render(area, buf);
+        if let None = self.max_size {
+            area = area.resize(Size::new(std::cmp::min(area.width, self.text.len() as u16), area.height));
+        }
         line.left_aligned()
             .render(area, buf);
-        area.resize(Size::new(self.max_size as u16, 1))
+
+        if let Some(max_size) = self.max_size {
+            area.resize(Size::new(max_size as u16, 1))
+        } else {
+            area
+        }
     }
 
     fn handle_event(&mut self, event: Event) -> Option<StateChange> {
+        eprintln!("TextEntry event: {:?}", event);
         let mut matched = true;
         if let Event::Key(key_event) = event {
             if !event.is_key_press() {return None}
@@ -220,7 +241,7 @@ impl InputWidget for TextEntry {
                 }
                 KeyCode::Enter => {return Some(StateChange::Pop)}
                 KeyCode::Char(c) => {
-                    if self.text.len() < self.max_size {
+                    if self.max_size.map_or(true, |max_size| self.text.len() < max_size) {
                         self.text.insert(self.cursor_pos, c);
                         self.cursor_pos += 1;
                     }

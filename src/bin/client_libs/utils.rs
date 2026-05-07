@@ -253,6 +253,7 @@ pub enum ClientState {
     Viewer(EntryTreeViewer),
     WriteVarientSelection(EntryVariantSelector),
     TextEntry(TextEntry),
+    AccessGroupBuilder(AccessGroupBuilder),
     AccessGroupIdList(AccessGroupIdList),
     Error(Vec<DataError>),
 }
@@ -263,6 +264,7 @@ impl InputWidget for ClientState {
             ClientState::Viewer(viewer) => viewer.reload(),
             ClientState::WriteVarientSelection(selector) => selector.reload(),
             ClientState::TextEntry(entry) => entry.reload(),
+            ClientState::AccessGroupBuilder(builder) => builder.reload(),
             ClientState::AccessGroupIdList(id_list) => id_list.reload(),
             ClientState::Error(..) => Ok(()),
         }
@@ -273,6 +275,7 @@ impl InputWidget for ClientState {
             ClientState::Viewer(viewer) => viewer.render(area, buf),
             ClientState::WriteVarientSelection(selector) => selector.render(area, buf),
             ClientState::TextEntry(entry) => entry.render(area, buf),
+            ClientState::AccessGroupBuilder(builder) => builder.render(area, buf),
             ClientState::AccessGroupIdList(id_list) => id_list.render(area, buf),
             ClientState::Error(errors) => {
                 let mut layout = Layout::horizontal([Constraint::Fill(1), Constraint::Percentage(50), Constraint::Fill(1)]).split(area);
@@ -299,6 +302,7 @@ impl InputWidget for ClientState {
             ClientState::Viewer(viewer) => viewer.handle_event(event),
             ClientState::WriteVarientSelection(selector) => selector.handle_event(event),
             ClientState::TextEntry(entry) => entry.handle_event(event),
+            ClientState::AccessGroupBuilder(builder) => builder.handle_event(event),
             ClientState::AccessGroupIdList(id_list) => id_list.handle_event(event),
             ClientState::Error(_) => {Some(StateChange::Pop)},
         }
@@ -309,6 +313,7 @@ impl InputWidget for ClientState {
             ClientState::Viewer(viewer) => viewer.focus(),
             ClientState::WriteVarientSelection(selector) => selector.focus(),
             ClientState::TextEntry(entry) => entry.focus(),
+            ClientState::AccessGroupBuilder(builder) => builder.focus(),
             ClientState::AccessGroupIdList(id_list) => id_list.focus(),
             ClientState::Error(_) => {},
         }
@@ -318,6 +323,7 @@ impl InputWidget for ClientState {
             ClientState::Viewer(viewer) => viewer.unfocus(),
             ClientState::WriteVarientSelection(selector) => selector.unfocus(),
             ClientState::TextEntry(entry) => entry.unfocus(),
+            ClientState::AccessGroupBuilder(builder) => builder.unfocus(),
             ClientState::AccessGroupIdList(id_list) => id_list.unfocus(),
             ClientState::Error(_) => {},
         }
@@ -328,8 +334,22 @@ impl InputWidget for ClientState {
             ClientState::Viewer(viewer) => viewer.consume_child(child),
             ClientState::WriteVarientSelection(selector) => selector.consume_child(child),
             ClientState::TextEntry(entry) => entry.consume_child(child),
+            ClientState::AccessGroupBuilder(builder) => builder.consume_child(child),
             ClientState::AccessGroupIdList(id_list) => id_list.consume_child(child),
             ClientState::Error(_) => {Some(StateChange::Pop)},
         }
+    }
+}
+
+impl ToString for ClientState {
+    fn to_string(&self) -> String {
+        String::from(match self {
+            ClientState::Viewer(..) => "Viewer",
+            ClientState::WriteVarientSelection(..) => "WriteVarientSelection",
+            ClientState::AccessGroupBuilder(..) => "AccessGroupBuilder",
+            ClientState::AccessGroupIdList(..) => "AccessGroupIdList",
+            ClientState::TextEntry(..) => "TextEntry",
+            ClientState::Error(..) => "Error",
+        })
     }
 }
